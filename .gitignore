@@ -7,3 +7,40 @@ keys/extended-std_share_*
 # Python 构建缓存
 __pycache__/
 *.pyc
+
+
+### AI-IDE ####
+/.agents/
+/.codegraph/
+/.opencode/
+/.vscode/
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+../.idea
+/.idea/
+*.iws
+*.class
+*.iml
+*.ipr
+/target/*
+/target
+*/target/
+*/target/**
+*target
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+/build/
