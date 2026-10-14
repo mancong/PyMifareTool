@@ -1,0 +1,263 @@
+# -*- coding: utf-8 -*-
+"""
+PyMifareTool - 密钥字典文件选择与并发解密配置对话框
+支持手动多选 MCT 标准字典 (std.keys, hotel-std.keys, extended-std.keys)、
+导入外部字典以及自定义并发解密线程数 (1 ~ 8 线程)
+"""
+
+import os
+from typing import List, Tuple, Dict, Any, Optional
+from PyQt6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox,
+    QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QFileDialog,
+    QMessageBox, QFrame, QGroupBox, QAbstractItemView
+)
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont, QColor
+
+from core.key_manager import KeyManager
+
+
+class KeySelectDialog(QDialog):
+    """M1 密钥字典多选与并发线程配置对话框"""
+
+    def __init__(self, parent=None, initial_selected: Optional[List[str]] = None, concurrency: int = 4):
+        super().__init__(parent)
+        self.setWindowTitle("🔑 密钥字典选择与并发配置 (MCT 生态)")
+        self.setMinimumSize(560, 420)
+        self.resize(600, 460)
+
+        self.initial_selected = initial_selected
+        self.concurrency = concurrency
+        self.available_files = []
+        self.checkboxes: Dict[str, QCheckBox] = {}
+
+        self._init_ui()
+        self._load_file_list()
+        self._update_summary()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        # 顶部说明 Banner
+        banner = QFrame()
+        banner.setStyleSheet("background-color: #1E293B; border-radius: 6px; padding: 6px 10px;")
+        b_lay = QVBoxLayout(banner)
+        b_lay.setContentsMargins(4, 4, 4, 4)
+        b_lay.setSpacing(3)
+        lbl_title = QLabel("选择用于读卡或字典破解的密钥库 (对标 MifareClassicTool)")
+        lbl_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #38BDF8;")
+        lbl_sub = QLabel("支持勾选 MCT 官方预置字典或载入外部字典，面对大字典时可开启多线程并发加速。")
+        lbl_sub.setStyleSheet("font-size: 11px; color: #94A3B8;")
+        b_lay.addWidget(lbl_title)
+        b_lay.addWidget(lbl_sub)
+        layout.addWidget(banner)
+
+        # 字典文件列表表格
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["勾选", "字典文件", "有效密钥数", "说明"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setStyleSheet(
+            "QTableWidget { background-color: #0B1120; gridline-color: #1E293B; border: 1px solid #334155; }"
+            "QHeaderView::section { background-color: #1E293B; color: #94A3B8; font-weight: bold; padding: 4px; }"
+        )
+        layout.addWidget(self.table)
+
+        # 中部操作组 (添加外部文件 + 并发线程配置)
+        opt_box = QGroupBox("⚙️ 并发与扩展选项")
+        opt_box.setStyleSheet("QGroupBox { font-weight: bold; color: #34D399; margin-top: 4px; }")
+        opt_lay = QHBoxLayout(opt_box)
+        opt_lay.setContentsMargins(8, 8, 8, 8)
+        opt_lay.setSpacing(10)
+
+        self.btn_add_external = QPushButton("➕ 导入外部字典文件...")
+        self.btn_add_external.setStyleSheet("background-color: #1E293B; border: 1px solid #475569; padding: 4px 8px;")
+        self.btn_add_external.clicked.connect(self._on_add_external_file)
+        opt_lay.addWidget(self.btn_add_external)
+
+        opt_lay.addStretch()
+
+        opt_lay.addWidget(QLabel("并发解密线程:"))
+        self.combo_threads = QComboBox()
+        self.combo_threads.addItems([
+            "4 线程并发 (推荐)",
+            "8 线程并发 (极速模式)",
+            "16 线程并发 (高并发模式)",
+            "32 线程并发 (激进批处理)",
+            "2 线程并发",
+            "1 线程 (单线调试)"
+        ])
+        # 默认选中对应索引
+        if self.concurrency == 32:
+            self.combo_threads.setCurrentIndex(3)
+        elif self.concurrency == 16:
+            self.combo_threads.setCurrentIndex(2)
+        elif self.concurrency == 8:
+            self.combo_threads.setCurrentIndex(1)
+        elif self.concurrency == 2:
+            self.combo_threads.setCurrentIndex(4)
+        elif self.concurrency == 1:
+            self.combo_threads.setCurrentIndex(5)
+        else:
+            self.combo_threads.setCurrentIndex(0)
+
+        opt_lay.addWidget(self.combo_threads)
+        layout.addWidget(opt_box)
+
+        # 统计摘要栏
+        self.lbl_summary = QLabel("📊 已选 0 个字典文件 | 合计 0 条去重有效密钥")
+        self.lbl_summary.setStyleSheet("font-size: 12px; font-weight: bold; color: #F59E0B;")
+        layout.addWidget(self.lbl_summary)
+
+        # 底部按钮
+        btn_box = QHBoxLayout()
+        btn_box.setSpacing(8)
+
+        self.btn_select_all = QPushButton("全选")
+        self.btn_select_all.setFixedWidth(60)
+        self.btn_select_all.clicked.connect(lambda: self._set_all_checked(True))
+        self.btn_select_none = QPushButton("全不选")
+        self.btn_select_none.setFixedWidth(60)
+        self.btn_select_none.clicked.connect(lambda: self._set_all_checked(False))
+        btn_box.addWidget(self.btn_select_all)
+        btn_box.addWidget(self.btn_select_none)
+
+        btn_box.addStretch()
+
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_confirm = QPushButton("确认使用")
+        self.btn_confirm.setStyleSheet("background-color: #0284C7; font-weight: bold; padding: 6px 16px;")
+        self.btn_confirm.clicked.connect(self.accept)
+        btn_box.addWidget(self.btn_cancel)
+        btn_box.addWidget(self.btn_confirm)
+        layout.addLayout(btn_box)
+
+    def _load_file_list(self):
+        """扫描并加载所有字典文件到列表中"""
+        self.available_files = KeyManager.list_available_files()
+        self.table.setRowCount(len(self.available_files))
+        self.checkboxes.clear()
+
+        for row, item in enumerate(self.available_files):
+            fname = item["filename"]
+
+            # 确定是否默认勾选
+            if self.initial_selected is not None:
+                checked = fname in self.initial_selected or item["filepath"] in self.initial_selected
+            else:
+                checked = item.get("is_default", False)
+
+            chk = QCheckBox()
+            chk.setChecked(checked)
+            chk.stateChanged.connect(self._update_summary)
+            self.checkboxes[fname] = chk
+
+            # 居中放置 CheckBox
+            w = QFrame()
+            lay = QHBoxLayout(w)
+            lay.setContentsMargins(8, 0, 8, 0)
+            lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(chk)
+            self.table.setCellWidget(row, 0, w)
+
+            # 文件名
+            it_name = QTableWidgetItem(fname)
+            it_name.setFlags(it_name.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            it_name.setForeground(QColor("#38BDF8"))
+            it_name.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+            self.table.setItem(row, 1, it_name)
+
+            # 密钥数
+            it_cnt = QTableWidgetItem(f"{item['key_count']:,} 键")
+            it_cnt.setFlags(it_cnt.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            it_cnt.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_cnt.setForeground(QColor("#34D399"))
+            self.table.setItem(row, 2, it_cnt)
+
+            # 说明
+            it_desc = QTableWidgetItem(item["desc"])
+            it_desc.setFlags(it_desc.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            it_desc.setToolTip(item["desc"])
+            self.table.setItem(row, 3, it_desc)
+
+    def _set_all_checked(self, state: bool):
+        for chk in self.checkboxes.values():
+            chk.setChecked(state)
+        self._update_summary()
+
+    def _update_summary(self):
+        """实时重新计算选中的去重密钥总数并更新提示"""
+        selected_files = self.get_selected_files()
+        combined = KeyManager.load_combined_keys(selected_files, include_defaults_fallback=False)
+        self.lbl_summary.setText(
+            f"📊 已选 {len(selected_files)} 个字典文件 | 合计去重有效密钥: {len(combined):,} 条"
+        )
+        if len(combined) > 500:
+            self.lbl_summary.setStyleSheet("font-size: 12px; font-weight: bold; color: #F59E0B;")
+        else:
+            self.lbl_summary.setStyleSheet("font-size: 12px; font-weight: bold; color: #34D399;")
+
+    def _on_add_external_file(self):
+        """用户导入外部字典文件并复制/加载"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "导入外部密钥字典文件", "", "密钥字典文件 (*.keys *.dic *.txt);;所有文件 (*.*)"
+        )
+        if path:
+            keys = KeyManager.parse_key_file(path)
+            if not keys:
+                QMessageBox.warning(self, "解析失败", "所选文件中未解析到有效的 12 位十六进制密钥！")
+                return
+
+            fname = os.path.basename(path)
+            target = os.path.join(KeyManager.get_keys_dir(), fname)
+            if os.path.abspath(path) != os.path.abspath(target):
+                try:
+                    import shutil
+                    shutil.copy2(path, target)
+                except Exception as e:
+                    QMessageBox.warning(self, "导入错误", f"拷贝字典失败: {e}")
+                    return
+
+            QMessageBox.information(self, "导入成功", f"成功导入字典文件 [{fname}]，包含 {len(keys)} 条有效密钥！")
+            self._load_file_list()
+            if fname in self.checkboxes:
+                self.checkboxes[fname].setChecked(True)
+            self._update_summary()
+
+    def get_selected_files(self) -> List[str]:
+        """获取所有被勾选的文件名列表"""
+        selected = []
+        for fname, chk in self.checkboxes.items():
+            if chk.isChecked():
+                selected.append(fname)
+        return selected
+
+    def get_selected_keys(self) -> List[str]:
+        """获取所有选中的文件合并后的去重十六进制密钥列表"""
+        selected_files = self.get_selected_files()
+        return KeyManager.load_combined_keys(selected_files)
+
+    def get_concurrency(self) -> int:
+        """获取选中的并发线程数"""
+        idx = self.combo_threads.currentIndex()
+        if idx == 0:
+            return 4
+        elif idx == 1:
+            return 8
+        elif idx == 2:
+            return 16
+        elif idx == 3:
+            return 32
+        elif idx == 4:
+            return 2
+        else:
+            return 1

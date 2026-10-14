@@ -1,0 +1,9 @@
+# 忽略所有以 "." 开头的文件夹（.idea / .venv 等）
+.*/
+
+# 忽略 keys 目录下所有 extended-std_share_ 开头的文件
+keys/extended-std_share_*
+
+# Python 构建缓存
+__pycache__/
+*.pyc
