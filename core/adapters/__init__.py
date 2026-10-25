@@ -7,6 +7,7 @@ PyMifareTool - 多硬件读写器驱动适配器层 (Hardware Adapters Layer)
 from .base_adapter import BaseReaderAdapter
 from .pn532_adapter import PN532Adapter
 from .broadcaster_adapter import BroadcasterAdapter
+from .libnfc_adapter import LibnfcCliAdapter
 from .factory import ReaderAdapterFactory
 from .extensions import PCSCReaderAdapter, VirtualDumpReaderAdapter
 
@@ -14,6 +15,7 @@ __all__ = [
     "BaseReaderAdapter",
     "PN532Adapter",
     "BroadcasterAdapter",
+    "LibnfcCliAdapter",
     "ReaderAdapterFactory",
     "PCSCReaderAdapter",
     "VirtualDumpReaderAdapter",

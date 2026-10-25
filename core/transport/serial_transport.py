@@ -5,11 +5,10 @@ PyMifareTool - 物理串口传输实现 (SerialTransport)
 严格执行硬件交互红线 1: 物理复位保护 (DTR=False, RTS=False)
 """
 
-import time
 import threading
 import serial
 from typing import Optional
-from .base import ITransport, TransportError
+from .base import CallableBool, CallableInt, ITransport, TransportError
 
 
 class SerialTransport(ITransport):
@@ -21,6 +20,8 @@ class SerialTransport(ITransport):
         self.timeout = timeout
         self._serial: Optional[serial.Serial] = None
         self._lock = threading.Lock()
+        self._dtr = False
+        self._rts = False
 
     def open(self) -> bool:
         with self._lock:
@@ -42,11 +43,13 @@ class SerialTransport(ITransport):
                 # 🚨 硬件红线 1：强制保持 DTR / RTS 为 False，防止拉高复位脚锁死 MCU
                 self._serial.dtr = False
                 self._serial.rts = False
+                self._dtr = False
+                self._rts = False
 
                 self._serial.reset_input_buffer()
                 self._serial.reset_output_buffer()
                 return True
-            except Exception as e:
+            except Exception:
                 self._serial = None
                 return False
 
@@ -59,11 +62,39 @@ class SerialTransport(ITransport):
                     pass
             self._serial = None
 
-    def is_open(self) -> bool:
-        return self._serial is not None and self._serial.is_open
+    @property
+    def is_open(self) -> CallableBool:
+        """链路是否处于可用开启状态 (支持属性访问与方法调用)"""
+        return CallableBool(self._serial is not None and bool(self._serial.is_open))
+
+    @property
+    def dtr(self) -> bool:
+        return self._dtr
+
+    @dtr.setter
+    def dtr(self, value: bool) -> None:
+        self._dtr = bool(value)
+        if self._serial is not None and self._serial.is_open:
+            try:
+                self._serial.dtr = self._dtr
+            except Exception:
+                pass
+
+    @property
+    def rts(self) -> bool:
+        return self._rts
+
+    @rts.setter
+    def rts(self, value: bool) -> None:
+        self._rts = bool(value)
+        if self._serial is not None and self._serial.is_open:
+            try:
+                self._serial.rts = self._rts
+            except Exception:
+                pass
 
     def write(self, data: bytes) -> int:
-        if not self.is_open():
+        if not self.is_open:
             raise TransportError("串口未连接或已关闭")
         with self._lock:
             try:
@@ -74,36 +105,57 @@ class SerialTransport(ITransport):
                 raise TransportError(f"串口写失败: {e}")
 
     def read(self, size: int = 1, timeout: Optional[float] = None) -> bytes:
-        if not self.is_open():
+        if not self.is_open:
             raise TransportError("串口未连接或已关闭")
         with self._lock:
             try:
                 if timeout is not None:
                     old_to = self._serial.timeout
                     self._serial.timeout = timeout
-                    data = self._serial.read(size)
-                    self._serial.timeout = old_to
-                    return data
+                    try:
+                        return self._serial.read(size)
+                    finally:
+                        self._serial.timeout = old_to
                 return self._serial.read(size)
             except Exception as e:
                 raise TransportError(f"串口读失败: {e}")
 
     def flush(self) -> None:
-        if self.is_open():
+        """刷新输出缓冲区 (与 pyserial 语义一致)"""
+        if self.is_open:
+            with self._lock:
+                try:
+                    self._serial.flush()
+                except Exception:
+                    pass
+
+    def reset_input_buffer(self) -> None:
+        """清空输入缓冲区"""
+        if self.is_open:
             with self._lock:
                 try:
                     self._serial.reset_input_buffer()
+                except Exception:
+                    pass
+
+    def reset_output_buffer(self) -> None:
+        """清空输出缓冲区"""
+        if self.is_open:
+            with self._lock:
+                try:
                     self._serial.reset_output_buffer()
                 except Exception:
                     pass
 
-    def in_waiting(self) -> int:
-        if not self.is_open():
-            return 0
+    @property
+    def in_waiting(self) -> CallableInt:
+        """当前可读字节数 (支持属性访问与方法调用)"""
+        if not self.is_open:
+            return CallableInt(0)
         try:
-            return self._serial.in_waiting
+            return CallableInt(self._serial.in_waiting)
         except Exception:
-            return 0
+            return CallableInt(0)
 
     @property
     def raw_serial(self) -> Optional[serial.Serial]:

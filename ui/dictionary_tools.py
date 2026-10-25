@@ -6,12 +6,14 @@ PyMifareTool - 密码字典库 / Access Bits 完整解析器 / 卡号换算器 /
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QTextEdit, QGroupBox, QGridLayout, QComboBox, QTabWidget, QPlainTextEdit,
-    QScrollArea, QFrame, QCheckBox, QFileDialog, QMessageBox
+    QScrollArea, QFrame, QCheckBox, QFileDialog, QMessageBox,
+    QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView, QSpinBox
 )
 from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt, pyqtSignal
 from core.protocol import AccessBitsDecoder, AccessBitsEncoder
 from core.key_manager import KeyManager
+from core.services.attack_runner import AttackRunner
 
 # 经典行业高频默认密钥字典 (门禁、梯控、一卡通、水控机)
 COMMON_KEYS = [
@@ -59,9 +61,14 @@ TRAILER_MODES = [
 class DictionaryToolsWidget(QWidget):
     # 发送原始 Hex 指令信号 (供主窗口连接)
     sig_send_hex = pyqtSignal(bytes)
+    # 外部破解完成通知载入 Dump 信号 (供主窗口或扇区表连接)
+    sig_load_dump_file = pyqtSignal(str)
+    # 恢复出密码信号 (sector, key_type, key_hex)
+    sig_key_recovered = pyqtSignal(int, str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.attack_runner = AttackRunner(bin_dir="nfc-bin", parent=self)
         self._init_ui()
 
     def _init_ui(self):
@@ -80,11 +87,14 @@ class DictionaryToolsWidget(QWidget):
         tabs.addTab(self._build_dictionary_tab(), "📖 密码字典库")
         # Tab 4: 指令调试终端
         tabs.addTab(self._build_debug_terminal_tab(), "📟 指令终端")
+        # Tab 5: 外部算法破解
+        tabs.addTab(self._build_attack_runner_tab(), "⚡ 外部算法破解")
 
         tabs.setTabToolTip(0, "Access Bits 控制字权限解析与可视化生成")
         tabs.setTabToolTip(1, "正序/倒序/8H10D/WG26/WG34 卡号多标准换算")
         tabs.setTabToolTip(2, "M1 卡常见默认行业高频密钥库")
         tabs.setTabToolTip(3, "底盘原生 Hex 指令收发与调试")
+        tabs.setTabToolTip(4, "Darkside (mfcuk) / Nested (mfoc) / Hardnested (crypto1_bs) 外部工具链联动破解")
 
         layout.addWidget(tabs)
 
@@ -121,7 +131,7 @@ class DictionaryToolsWidget(QWidget):
             presets.addWidget(btn)
         presets.addStretch()
 
-        # 交互式选择器 (对标 MifareOneTool S50HTool)
+        # 交互式选择器 (控制字位运算生成器)
         grp_builder = QGroupBox("⚙️ 交互式权限选择器 (可视化生成合法控制字，自动计算反码校验)")
         grp_builder.setStyleSheet("QGroupBox { font-weight: bold; color: #38BDF8; }")
         grid_b = QGridLayout(grp_builder)
@@ -339,7 +349,7 @@ class DictionaryToolsWidget(QWidget):
 
         t_row = QHBoxLayout()
         lbl_t = QLabel("📖 Mifare Classic 密钥字典库管理器 (集成 MCT 生态)")
-        lbl_t.setStyleSheet("color: #38BDF8; font-weight: bold; font-size: 13px;")
+        lbl_t.setStyleSheet("color: #38BDF8; font-weight: bold; font-size: 10pt;")
         t_row.addWidget(lbl_t)
         t_row.addStretch()
 
@@ -565,3 +575,306 @@ class DictionaryToolsWidget(QWidget):
     def append_terminal_log(self, direction: str, msg: str):
         """外部调用: 向终端追加日志"""
         self.txt_terminal.appendPlainText(f"[{direction}] {msg}")
+
+    # ─────────────────────────────────────────────────
+    # Tab 5: 外部算法与工具链破解 (MFOC, MFCUK, Hardnested)
+    # ─────────────────────────────────────────────────
+    def _build_attack_runner_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        # 1. 外部工具链状态检测栏
+        env_box = QGroupBox("🛠️ 外部工具链环境 (nfc-bin)")
+        env_lay = QVBoxLayout(env_box)
+        env_lay.setContentsMargins(8, 6, 8, 6)
+        env_lay.setSpacing(4)
+
+        h_path = QHBoxLayout()
+        h_path.addWidget(QLabel("工具链目录:"))
+        self.txt_bin_dir = QLineEdit(self.attack_runner.bin_dir)
+        self.txt_bin_dir.setFont(QFont("Consolas", 10))
+        btn_browse_bin = QPushButton("📁 浏览...")
+        btn_browse_bin.clicked.connect(self._on_browse_bin_dir)
+        btn_refresh_bin = QPushButton("🔄 检测")
+        btn_refresh_bin.clicked.connect(self._refresh_tool_status)
+        h_path.addWidget(self.txt_bin_dir, stretch=1)
+        h_path.addWidget(btn_browse_bin)
+        h_path.addWidget(btn_refresh_bin)
+        env_lay.addLayout(h_path)
+
+        # 状态指示徽章
+        self.lbl_tool_status = QLabel("检测中...")
+        self.lbl_tool_status.setFont(QFont("Consolas", 10))
+        self.lbl_tool_status.setStyleSheet("color: #94A3B8; padding: 2px 4px;")
+        env_lay.addWidget(self.lbl_tool_status)
+        layout.addWidget(env_box)
+
+        # 2. 攻击模式与参数配置
+        cfg_box = QGroupBox("⚡ 攻击策略与参数配置")
+        cfg_lay = QGridLayout(cfg_box)
+        cfg_lay.setContentsMargins(8, 8, 8, 8)
+        cfg_lay.setSpacing(6)
+
+        cfg_lay.addWidget(QLabel("攻击策略:"), 0, 0)
+        self.cmb_attack_type = QComboBox()
+        self.cmb_attack_type.addItems([
+            "MFOC 嵌套推导 (Nested Attack - 需已知至少 1 个扇区密码)",
+            "MFCUK Darkside 盲破 (全加密无密码卡恢复第 1 个扇区密钥)",
+            "Hardnested 强防卡破解 (针对修复 PRNG 漏洞硬防卡)",
+            "MFDetect 卡片加密漏洞探测",
+        ])
+        self.cmb_attack_type.currentIndexChanged.connect(self._on_attack_type_changed)
+        cfg_lay.addWidget(self.cmb_attack_type, 0, 1, 1, 3)
+
+        cfg_lay.addWidget(QLabel("导出 Dump:"), 1, 0)
+        self.txt_attack_dump = QLineEdit("dump.mfd")
+        self.txt_attack_dump.setFont(QFont("Consolas", 10))
+        btn_browse_dump = QPushButton("📁 路径")
+        btn_browse_dump.clicked.connect(self._on_browse_dump_path)
+        h_dump = QHBoxLayout()
+        h_dump.addWidget(self.txt_attack_dump, stretch=1)
+        h_dump.addWidget(btn_browse_dump)
+        cfg_lay.addLayout(h_dump, 1, 1, 1, 3)
+
+        # 动态参数行: 已知密钥与扇区
+        self.lbl_known_key = QLabel("已知密钥 (Hex):")
+        self.txt_known_key = QLineEdit("FFFFFFFFFFFF")
+        self.txt_known_key.setFont(QFont("Consolas", 10))
+        cfg_lay.addWidget(self.lbl_known_key, 2, 0)
+        cfg_lay.addWidget(self.txt_known_key, 2, 1)
+
+        self.lbl_known_sec = QLabel("已知扇区:")
+        self.spn_known_sec = QSpinBox()
+        self.spn_known_sec.setRange(0, 39)
+        self.spn_known_sec.setValue(0)
+        cfg_lay.addWidget(self.lbl_known_sec, 2, 2)
+        cfg_lay.addWidget(self.spn_known_sec, 2, 3)
+
+        # 动态参数行: 目标扇区与密钥类型
+        self.lbl_target_sec = QLabel("目标扇区:")
+        self.spn_target_sec = QSpinBox()
+        self.spn_target_sec.setRange(0, 39)
+        self.spn_target_sec.setValue(1)
+        cfg_lay.addWidget(self.lbl_target_sec, 3, 0)
+        cfg_lay.addWidget(self.spn_target_sec, 3, 1)
+
+        self.lbl_target_key_type = QLabel("目标密钥类型:")
+        self.cmb_target_key_type = QComboBox()
+        self.cmb_target_key_type.addItems(["Key A", "Key B"])
+        cfg_lay.addWidget(self.lbl_target_key_type, 3, 2)
+        cfg_lay.addWidget(self.cmb_target_key_type, 3, 3)
+
+        layout.addWidget(cfg_box)
+
+        # 3. 操作按钮与进度条
+        act_lay = QHBoxLayout()
+        self.btn_run_attack = QPushButton("🚀 启动攻击")
+        self.btn_run_attack.setFixedHeight(32)
+        self.btn_run_attack.setStyleSheet("background-color: #0284C7; font-weight: bold; padding: 4px 18px;")
+        self.btn_run_attack.clicked.connect(self._on_start_attack)
+
+        self.btn_stop_attack = QPushButton("⏹ 终止任务")
+        self.btn_stop_attack.setFixedHeight(32)
+        self.btn_stop_attack.setEnabled(False)
+        self.btn_stop_attack.setStyleSheet("background-color: #DC2626; font-weight: bold; padding: 4px 16px;")
+        self.btn_stop_attack.clicked.connect(self._on_stop_attack)
+
+        self.btn_load_attack_dump = QPushButton("📂 载入破解 Dump 到主表")
+        self.btn_load_attack_dump.setFixedHeight(32)
+        self.btn_load_attack_dump.setStyleSheet("background-color: #059669; font-weight: bold; padding: 4px 14px;")
+        self.btn_load_attack_dump.clicked.connect(self._on_load_attack_dump)
+
+        btn_clear_log = QPushButton("🧹 清空输出")
+        btn_clear_log.setFixedHeight(32)
+        btn_clear_log.clicked.connect(lambda: self.txt_attack_log.clear())
+
+        act_lay.addWidget(self.btn_run_attack)
+        act_lay.addWidget(self.btn_stop_attack)
+        act_lay.addWidget(self.btn_load_attack_dump)
+        act_lay.addStretch(1)
+        act_lay.addWidget(btn_clear_log)
+        layout.addLayout(act_lay)
+
+        self.attack_prog_bar = QProgressBar()
+        self.attack_prog_bar.setRange(0, 100)
+        self.attack_prog_bar.setValue(0)
+        self.attack_prog_bar.setFixedHeight(12)
+        self.attack_prog_bar.setTextVisible(False)
+        self.attack_prog_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #0F172A;
+                border: 1px solid #334155;
+                border-radius: 3px;
+            }
+            QProgressBar::chunk {
+                background-color: #38BDF8;
+                border-radius: 2px;
+            }
+        """)
+        layout.addWidget(self.attack_prog_bar)
+
+        # 4. 终端日志与捕获密钥双栏
+        bottom_h = QHBoxLayout()
+
+        # 进程标准输出终端
+        self.txt_attack_log = QPlainTextEdit()
+        self.txt_attack_log.setReadOnly(True)
+        self.txt_attack_log.setFont(QFont("Consolas", 9))
+        self.txt_attack_log.setStyleSheet(
+            "background-color: #050B14; color: #38BDF8; border: 1px solid #1E293B; border-radius: 4px;"
+        )
+        self.txt_attack_log.setPlaceholderText("外部工具链命令行执行输出将在此实时显示...")
+        bottom_h.addWidget(self.txt_attack_log, stretch=2)
+
+        # 捕获密钥小看板
+        keys_card = QFrame()
+        keys_card.setStyleSheet("background-color: #1E293B; border-radius: 4px; padding: 4px;")
+        k_lay = QVBoxLayout(keys_card)
+        k_lay.setContentsMargins(4, 4, 4, 4)
+        k_lay.setSpacing(4)
+
+        lbl_k_t = QLabel("🔑 捕获/恢复出的扇区密钥:")
+        lbl_k_t.setStyleSheet("font-size: 11px; font-weight: bold; color: #10B981;")
+        k_lay.addWidget(lbl_k_t)
+
+        self.tbl_recovered_keys = QTableWidget()
+        self.tbl_recovered_keys.setColumnCount(3)
+        self.tbl_recovered_keys.setHorizontalHeaderLabels(["扇区", "类型", "密钥 (Hex)"])
+        self.tbl_recovered_keys.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.tbl_recovered_keys.verticalHeader().setVisible(False)
+        self.tbl_recovered_keys.setStyleSheet("font-family: Consolas; font-size: 10px;")
+        k_lay.addWidget(self.tbl_recovered_keys, stretch=1)
+
+        btn_save_recovered = QPushButton("💾 导入至密码字典库")
+        btn_save_recovered.setStyleSheet("background-color: #7C3AED; font-weight: bold; font-size: 11px;")
+        btn_save_recovered.clicked.connect(self._on_save_recovered_keys)
+        k_lay.addWidget(btn_save_recovered)
+
+        bottom_h.addWidget(keys_card, stretch=1)
+        layout.addLayout(bottom_h)
+
+        # 连接 AttackRunner 信号
+        self.attack_runner.sig_output.connect(self.txt_attack_log.appendPlainText)
+        self.attack_runner.sig_progress.connect(self._on_attack_progress)
+        self.attack_runner.sig_finished.connect(self._on_attack_finished)
+        self.attack_runner.sig_key_found.connect(self._on_key_found)
+
+        self._refresh_tool_status()
+        self._on_attack_type_changed(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(tab)
+        return scroll
+
+    def _on_browse_bin_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "选择工具链目录", self.txt_bin_dir.text().strip())
+        if d:
+            self.txt_bin_dir.setText(d)
+            self.attack_runner.set_bin_dir(d)
+            self._refresh_tool_status()
+
+    def _refresh_tool_status(self):
+        b_dir = self.txt_bin_dir.text().strip()
+        self.attack_runner.set_bin_dir(b_dir)
+        st = self.attack_runner.check_available_tools()
+
+        def badge(ok: bool, name: str) -> str:
+            color = "#34D399" if ok else "#EF4444"
+            status = "已就绪" if ok else "未找到"
+            return f"{name}: <span style='color:{color}; font-weight:bold;'>[{status}]</span>"
+
+        html = "  |  ".join([
+            badge(st["mfoc"], "mfoc.exe"),
+            badge(st["mfcuk"], "mfcuk.exe"),
+            badge(st["crypto1_bs"], "crypto1_bs.exe"),
+            badge(st["mfdetect"], "mfdetect.exe"),
+        ])
+        self.lbl_tool_status.setText(f"<html>{html}</html>")
+
+    def _on_attack_type_changed(self, idx: int):
+        # 0: MFOC, 1: MFCUK, 2: Hardnested, 3: MFDetect
+        self.lbl_known_key.setVisible(idx in (0, 2))
+        self.txt_known_key.setVisible(idx in (0, 2))
+        self.lbl_known_sec.setVisible(idx == 2)
+        self.spn_known_sec.setVisible(idx == 2)
+        self.lbl_target_sec.setVisible(idx in (1, 2))
+        self.spn_target_sec.setVisible(idx in (1, 2))
+        self.lbl_target_key_type.setVisible(idx == 1)
+        self.cmb_target_key_type.setVisible(idx == 1)
+
+    def _on_browse_dump_path(self):
+        f, _ = QFileDialog.getSaveFileName(self, "指定导出 Dump 文件路径", "dump.mfd", "Dump 文件 (*.mfd *.dump *.bin);;所有文件 (*.*)")
+        if f:
+            self.txt_attack_dump.setText(f)
+
+    def _on_start_attack(self):
+        idx = self.cmb_attack_type.currentIndex()
+        out_dump = self.txt_attack_dump.text().strip() or "dump.mfd"
+
+        self.btn_run_attack.setEnabled(False)
+        self.btn_stop_attack.setEnabled(True)
+        self.attack_prog_bar.setValue(0)
+
+        if idx == 0:  # MFOC
+            k_key = self.txt_known_key.text().strip()
+            known_keys = [k_key] if k_key else []
+            self.attack_runner.run_mfoc(output_dump=out_dump, known_keys=known_keys)
+        elif idx == 1:  # MFCUK
+            sec = self.spn_target_sec.value()
+            k_type = "A" if self.cmb_target_key_type.currentIndex() == 0 else "B"
+            self.attack_runner.run_mfcuk(output_dump=out_dump, sector=sec, key_type=k_type)
+        elif idx == 2:  # Hardnested
+            known_k = self.txt_known_key.text().strip() or "FFFFFFFFFFFF"
+            known_s = self.spn_known_sec.value()
+            target_s = self.spn_target_sec.value()
+            self.attack_runner.run_hardnested(known_key=known_k, known_sector=known_s, target_sector=target_s, output_dump=out_dump)
+        elif idx == 3:  # MFDetect
+            self.attack_runner.run_mfdetect()
+
+    def _on_stop_attack(self):
+        self.attack_runner.cancel()
+        self.btn_run_attack.setEnabled(True)
+        self.btn_stop_attack.setEnabled(False)
+
+    def _on_attack_progress(self, pct: int, desc: str):
+        self.attack_prog_bar.setValue(pct)
+
+    def _on_attack_finished(self, success: bool, msg: str):
+        self.btn_run_attack.setEnabled(True)
+        self.btn_stop_attack.setEnabled(False)
+        self.attack_prog_bar.setValue(100 if success else 0)
+
+    def _on_key_found(self, sector: int, key_type: str, key_hex: str):
+        self.sig_key_recovered.emit(sector, key_type, key_hex)
+        row = self.tbl_recovered_keys.rowCount()
+        self.tbl_recovered_keys.insertRow(row)
+        self.tbl_recovered_keys.setItem(row, 0, QTableWidgetItem(f"S{sector:02d}"))
+        self.tbl_recovered_keys.setItem(row, 1, QTableWidgetItem(f"Key {key_type}"))
+        self.tbl_recovered_keys.setItem(row, 2, QTableWidgetItem(key_hex.upper()))
+
+    def _on_load_attack_dump(self):
+        dump_p = self.txt_attack_dump.text().strip()
+        import os
+        if not os.path.exists(dump_p):
+            QMessageBox.warning(self, "提示", f"未找到 Dump 文件: {dump_p}，请确认任务是否已成功完成并生成了文件。")
+            return
+        self.sig_load_dump_file.emit(dump_p)
+        QMessageBox.information(self, "成功", f"已通知载入 Dump: {dump_p}")
+
+    def _on_save_recovered_keys(self):
+        rows = self.tbl_recovered_keys.rowCount()
+        if rows == 0:
+            QMessageBox.information(self, "提示", "当前没有捕获到任何密钥。")
+            return
+        cnt = 0
+        for r in range(rows):
+            k_hex = self.tbl_recovered_keys.item(r, 2).text().strip()
+            if len(k_hex) == 12:
+                KeyManager.save_custom_keys([k_hex])
+                cnt += 1
+        self._load_custom_keys()
+        QMessageBox.information(self, "成功", f"已将 {cnt} 个密钥导入并保存至密码字典库！")

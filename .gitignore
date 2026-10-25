@@ -44,3 +44,10 @@ __pycache__/
 /nbdist/
 /.nb-gradle/
 /build/
+
+# Matplotlib 临时目录
+matplotlib-*/
+
+# SQLite WAL 临时文件
+cards.db-wal
+cards.db-shm

@@ -69,10 +69,10 @@ class CardManageWidget(QWidget):
         lay_cards.addLayout(tool_cards)
 
         self.table_cards = QTableWidget()
-        self.table_cards.setColumnCount(8)
+        self.table_cards.setColumnCount(9)
         self.table_cards.setHorizontalHeaderLabels([
             "物理卡号 (UID)", "卡片名称", "持卡人", "十进制卡号 (8H10D)",
-            "韦根 (WG26)", "刷卡次数", "最后刷卡时间", "备注"
+            "韦根 (WG26)", "韦根 (WG34)", "刷卡次数", "最后刷卡时间", "备注"
         ])
         self.table_cards.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table_cards.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -136,13 +136,14 @@ class CardManageWidget(QWidget):
                 c.get("card_holder", ""),
                 c.get("dec_10d", ""),
                 c.get("wiegand_26", ""),
+                c.get("wiegand_34", "") or "",
                 str(c.get("swipe_count", 0)),
                 c.get("last_swiped_at", ""),
                 c.get("note", "") or ""
             ]
             for col, val in enumerate(items):
                 item = QTableWidgetItem(val)
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col not in [1, 7] else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col not in [1, 8] else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 self.table_cards.setItem(row, col, item)
 
     def refresh_logs(self):
@@ -171,7 +172,8 @@ class CardManageWidget(QWidget):
         uid = self.table_cards.item(selected, 0).text()
         name = self.table_cards.item(selected, 1).text()
         holder = self.table_cards.item(selected, 2).text()
-        note = self.table_cards.item(selected, 7).text()
+        note_item = self.table_cards.item(selected, 8)
+        note = note_item.text() if note_item else ""
 
         dialog = EditCardDialog(uid, name, holder, note, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -186,13 +188,14 @@ class CardManageWidget(QWidget):
             cards = self.db.list_all_cards()
             with open(path, "w", encoding="utf-8-sig", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["UID", "卡片名称", "持卡人", "十进制卡号", "韦根26", "刷卡次数", "最后刷卡时间", "备注"])
+                writer.writerow(["UID", "卡片名称", "持卡人", "十进制卡号", "韦根26", "韦根34", "刷卡次数", "最后刷卡时间", "备注"])
                 for c in cards:
                     writer.writerow([
                         c.get("uid"), c.get("card_name"), c.get("card_holder"),
-                        c.get("dec_10d"), c.get("wiegand_26"), c.get("swipe_count"),
-                        c.get("last_swiped_at"), c.get("note")
+                        c.get("dec_10d"), c.get("wiegand_26"), c.get("wiegand_34"),
+                        c.get("swipe_count"), c.get("last_swiped_at"), c.get("note")
                     ])
+            QMessageBox.information(self, "导出成功", f"卡片列表已导出至:\n{path}")
             QMessageBox.information(self, "导出成功", f"卡片列表已导出至:\n{path}")
 
     def _on_export_logs(self):

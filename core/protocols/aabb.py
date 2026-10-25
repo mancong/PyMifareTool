@@ -160,9 +160,6 @@ class AABBProtocol(BaseProtocolCodec):
             "status": None
         }
 
-        # 延迟按需导入 CardConverter 避免循环引用
-        from core.models.card_converter import CardConverter
-
         # CMD 0x01: 自动读卡 UID 上报
         if cmd == cls.CMD_AUTO_UID and len(payload) >= 4:
             if len(payload) in (7, 10):
@@ -171,7 +168,6 @@ class AABBProtocol(BaseProtocolCodec):
                 uid_bytes = payload[:4]
             result["uid_bytes"] = uid_bytes
             result["uid_len"] = len(payload)
-            result["conversions"] = CardConverter.convert_uid(uid_bytes)
 
         # 寻卡响应
         elif cmd == cls.CMD_REQUEST_A and len(payload) >= 1:
@@ -193,7 +189,6 @@ class AABBProtocol(BaseProtocolCodec):
                 result["ok"] = True
                 uid_bytes = payload[1:5]
                 result["uid_bytes"] = uid_bytes
-                result["conversions"] = CardConverter.convert_uid(uid_bytes)
             else:
                 result["status"] = "fail"
                 result["ok"] = False

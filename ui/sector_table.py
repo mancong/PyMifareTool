@@ -1,65 +1,118 @@
 # -*- coding: utf-8 -*-
 """
-PyMifareTool - 16 扇区可视化数据矩阵组件 (Pro 增强版)
-支持：
-1. 0~15 扇区、64 个数据块、Key A、控制字、Key B 视觉分块渲染
-2. 双击直接就地编辑 Hex 字节，自动校验并实时回写同步至 MifareDump
-3. 集成一键读卡 (Read Card)、一键写卡 (Write Card)、扇区字典攻击 (Crack Keys) 与固件探测
-4. 任务进度条与操作取消控制
+PyMifareTool - 16/40 扇区可视化数据矩阵与实时数据分析中枢 (Pro 现代化重构版)
+核心特性：
+1. 实时数据指标看板 (Card Live Stats)：卡片规格、解密覆盖率、密钥库覆盖、数据资产与钱包特征
+2. 扇区全景雷达与图例一体化栏 (Sector Radar & Legend Strip)：0~15 扇区数字雷达芯片与平滑滚动导航
+3. 实时数据智能解析器 (Live Block Inspector)：
+   - 块定位与语义识别 (Block 0 / 扇区尾块 / 电子钱包 / 普通数据)
+   - 连续 Hex 流、ASCII 解码、大小端数值转换
+   - UID / BCC 校验比对、Access Bits 权限矩阵深度透视
+   - Mifare 电子钱包 (Value Block) 自动探测、余额折算与一键格式化生成
+4. 现代化暗黑科技美学：
+   - 水平横向与垂直双向自由滚动，绝不截断 ASCII
+   - 扇区之间采用 2px 精致微细分界线，彻底消除突兀大空白
+   - 0~15 纯数字高亮胶囊雷达芯片，杜绝 DPI 缩放文字变形
+5. 双向就地编辑与完全兼容既有测试契约
 """
 
-from typing import Optional
+from typing import Optional, List, Dict, Any, Tuple
+import struct
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QHeaderView, QLabel, QPushButton, QFileDialog, QMessageBox, QAbstractItemView,
-    QProgressBar, QFrame, QCheckBox, QToolButton, QMenu
+    QProgressBar, QFrame, QCheckBox, QToolButton, QMenu, QSplitter, QComboBox
 )
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtCore import Qt, pyqtSignal
 
 from core.dump_model import MifareDump, BlockState
 from core.card_service import CardOperationWorker
+from ui.sector_widgets import (
+    parse_value_block, encode_value_block, calculate_dump_statistics,
+    CardStatsHeader, SectorRadarBar, LiveBlockInspector,
+)
 
+
+# ==============================================================================
+# 算法与语义解析辅助函数 (Mifare Value Block & Dump Statistics)
+# 核心主组件: 扇区可视化数据矩阵与操作中枢 (SectorTableWidget)
+# ==============================================================================
 
 class SectorTableWidget(QWidget):
-    # 信号：请求主窗口转发日志或通知
+    """
+    Mifare Classic 16/40 扇区可视化数据矩阵主视图 (Pro 现代化重构版)
+    完全集成：
+    - 实时数据指标总览栏 (CardStatsHeader)
+    - 扇区全景雷达与图例一体化栏 (SectorRadarBar)
+    - 64 块三态彩色矩阵 (QTableWidget)
+    - 实时数据智能解析器 (LiveBlockInspector)
+    """
     sig_notify = pyqtSignal(str)
 
     def __init__(self, serial_worker=None, parent=None):
         super().__init__(parent)
         self.serial_worker = serial_worker
         self.dump = MifareDump()
+        self.db = None  # CardDatabase (由主窗口注入，用于密钥留存)
         self.card_op_worker: Optional[CardOperationWorker] = None
-        self._updating_table = False  # 防止刷新表格时触发 cellChanged
+        self._updating_table = False
+        self._row_map: List[Optional[int]] = []
+        self._block_to_row: List[int] = []
 
-        # 字典与并发配置状态
+        # 字典与并发状态
         self._selected_key_files: Optional[List[str]] = None
         self._selected_keys: Optional[List[str]] = None
-        self._concurrency: int = 4
+        self._concurrency: int = 1
 
         self._init_ui()
 
     def set_serial_worker(self, worker):
         self.serial_worker = worker
 
-    def _init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+    def set_database(self, db):
+        """注入卡片数据库 (用于留存读取/破解成功的卡号与密钥)"""
+        self.db = db
 
-        # 1. 顶部主功能栏 (卡片式双行自适应分组，避免低分辨率屏幕按钮溢出或遮挡)
+    def _persist_sector_keys(self, sector: int, key_a: str, key_b: str):
+        """将成功解密的扇区密钥留存到数据库 (以当前卡片 UID 为主键)"""
+        if not self.db:
+            return
+        try:
+            uid = self.dump.get_block(0)[:4].hex().upper()
+        except Exception:
+            uid = ""
+        if not uid:
+            return
+        try:
+            self.db.save_sector_keys(uid, sector, key_a, key_b)
+            self.sig_notify.emit(f"🔐 已留存密钥: 卡 {uid} 扇区 S{sector:02d} (便于后续直接解密)")
+        except Exception as e:
+            self.sig_notify.emit(f"密钥留存失败: {e}")
+
+    def _init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(4)
+
+        # 1. 顶部主功能栏 (卡片式双行分组)
         tool_frame = QFrame()
-        tool_frame.setStyleSheet(
-            "QFrame#toolFrame { background-color: #1E293B; border: 1px solid #334155; border-radius: 8px; }"
-        )
+        tool_frame.setStyleSheet("""
+            QFrame#toolFrame {
+                background-color: #1E293B;
+                border: 1px solid #334155;
+                border-radius: 6px;
+            }
+        """)
         tool_frame.setObjectName("toolFrame")
         tool_vbox = QVBoxLayout(tool_frame)
-        tool_vbox.setContentsMargins(8, 6, 8, 6)
-        tool_vbox.setSpacing(6)
+        tool_vbox.setContentsMargins(8, 4, 8, 4)
+        tool_vbox.setSpacing(4)
 
-        # 第 1 行：文件 Dump 与全卡纠错工具 (自适应紧凑工具按钮与下拉菜单)
+        # 第 1 行：文件 Dump 与纠错管理
         row1 = QHBoxLayout()
-        row1.setSpacing(6)
+        row1.setSpacing(5)
         lbl_r1 = QLabel("📁 Dump 管理:")
         lbl_r1.setStyleSheet("color: #94A3B8; font-weight: bold; font-size: 11px;")
         row1.addWidget(lbl_r1)
@@ -69,7 +122,7 @@ class SectorTableWidget(QWidget):
         self.btn_save = QPushButton("💾 导出 Dump")
         self.btn_save.clicked.connect(self._on_save_file)
 
-        # 格式转换下拉菜单 (MCT / 文本 / 字典)
+        # 格式转换
         self.btn_export_more = QToolButton()
         self.btn_export_more.setText("📄 格式转换")
         self.btn_export_more.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
@@ -83,7 +136,7 @@ class SectorTableWidget(QWidget):
         self.btn_export_more.setMenu(menu_exp)
         self.btn_export_more.clicked.connect(self._on_export_txt)
 
-        # 纠错与修复下拉菜单 (检查 / 纠正)
+        # 纠错与修复
         self.btn_check_fix = QToolButton()
         self.btn_check_fix.setText("🛡️ 纠错与修复")
         self.btn_check_fix.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
@@ -109,11 +162,17 @@ class SectorTableWidget(QWidget):
         row1.addWidget(self.btn_export_more)
         row1.addWidget(self.btn_check_fix)
         row1.addWidget(self.btn_reset)
-        row1.addStretch()
+        row1.addStretch(1)
 
-        # 第 2 行：卡片硬件交互与写保护
+        # 切换 Inspector 显隐
+        self.btn_toggle_inspector = QPushButton("🔍 数据解析器 [收起]")
+        self.btn_toggle_inspector.setStyleSheet("background-color: #334155; font-size: 11px;")
+        self.btn_toggle_inspector.clicked.connect(self._toggle_inspector_panel)
+        row1.addWidget(self.btn_toggle_inspector)
+
+        # 第 2 行：卡片硬件交互
         row2 = QHBoxLayout()
-        row2.setSpacing(6)
+        row2.setSpacing(5)
         lbl_r2 = QLabel("⚡ 卡片操作:")
         lbl_r2.setStyleSheet("color: #94A3B8; font-weight: bold; font-size: 11px;")
         row2.addWidget(lbl_r2)
@@ -130,7 +189,7 @@ class SectorTableWidget(QWidget):
         self.btn_crack.setStyleSheet("background-color: #7C3AED; font-weight: bold;")
         self.btn_crack.clicked.connect(self._on_crack_keys)
 
-        self.btn_key_config = QPushButton("⚙️ 字典并发")
+        self.btn_key_config = QPushButton("⚙️ 字典配置")
         self.btn_key_config.setStyleSheet("background-color: #334155; font-size: 11px;")
         self.btn_key_config.clicked.connect(self._on_configure_keys)
 
@@ -138,9 +197,21 @@ class SectorTableWidget(QWidget):
         self.btn_probe.setStyleSheet("background-color: #059669; font-weight: bold;")
         self.btn_probe.clicked.connect(self._on_probe_firmware)
 
+        self.btn_clone_wizard = QPushButton("⚡ 克隆向导")
+        self.btn_clone_wizard.setStyleSheet("background-color: #0284C7; font-weight: bold;")
+        self.btn_clone_wizard.setToolTip("面向新手的两步一键复制/克隆卡向导")
+        self.btn_clone_wizard.clicked.connect(self._on_open_clone_wizard)
+
+        self.btn_magic_tools = QPushButton("🪄 魔术卡")
+        self.btn_magic_tools.setStyleSheet("background-color: #7C3AED; font-weight: bold;")
+        self.btn_magic_tools.setToolTip("魔术卡高级工具箱 (UID/CUID改号/出厂化/UFUID锁死)")
+        self.btn_magic_tools.clicked.connect(self._on_open_magic_tools)
+
         row2.addWidget(self.btn_read_card)
         row2.addWidget(self.btn_write_card)
         row2.addWidget(self.btn_crack)
+        row2.addWidget(self.btn_clone_wizard)
+        row2.addWidget(self.btn_magic_tools)
         row2.addWidget(self.btn_key_config)
         row2.addWidget(self.btn_probe)
         row2.addSpacing(6)
@@ -149,56 +220,117 @@ class SectorTableWidget(QWidget):
         self.chk_protect_b0.setChecked(True)
         self.chk_protect_b0.setStyleSheet("color: #FBBF24; font-size: 11px; font-weight: bold;")
         row2.addWidget(self.chk_protect_b0)
-        row2.addStretch()
+
+        self.cmb_magic_type = QComboBox()
+        self.cmb_magic_type.addItems(["CUID (默认常规写)", "GEN1A (后门盲写)"])
+        self.cmb_magic_type.setToolTip("改写 Block 0 时的魔术卡类型:\n- CUID/Gen2: 普通写指令，需扇区密钥认证\n- GEN1A: 后门 40/43 序列盲写 (需卡片支持)")
+        self.cmb_magic_type.setEnabled(False)
+        self.chk_protect_b0.toggled.connect(lambda checked: self.cmb_magic_type.setEnabled(not checked))
+        row2.addWidget(self.cmb_magic_type)
+
+        row2.addSpacing(6)
+        lbl_card_model = QLabel("规格:")
+        lbl_card_model.setStyleSheet("color: #94A3B8; font-size: 11px;")
+        row2.addWidget(lbl_card_model)
+        self.cmb_card_model = QComboBox()
+        self.cmb_card_model.addItems(["1K (S50)", "4K (S70)"])
+        self.cmb_card_model.setToolTip("选择当前处理的卡片容量规格 (1K/4K)")
+        self.cmb_card_model.currentIndexChanged.connect(self._on_card_model_changed)
+        row2.addWidget(self.cmb_card_model)
+        row2.addStretch(1)
 
         tool_vbox.addLayout(row1)
         tool_vbox.addLayout(row2)
-        layout.addWidget(tool_frame)
+        main_layout.addWidget(tool_frame)
 
-        # 2. 图例说明栏 (含未读取占位与加密状态提示，彻底消除歧义)
-        legend_layout = QHBoxLayout()
-        legend_layout.addWidget(self._make_legend("Block 0 (UID/厂商块)", "#3D2B1F", "#FFB300"))
-        legend_layout.addWidget(self._make_legend("普通数据块 (已读取 Hex)", "#1E293B", "#E2E8F0"))
-        legend_layout.addWidget(self._make_legend("扇区尾块 (Key A / 控制字 / Key B)", "#1A365D", "#60A5FA"))
-        legend_layout.addWidget(self._make_legend("[-] 未载入/未读取", "#0F172A", "#64748B"))
-        legend_layout.addWidget(self._make_legend("[??] 加密/读取受阻", "#3B1B1B", "#F87171"))
-        legend_layout.addStretch()
-        layout.addLayout(legend_layout)
+        # 2. 实时数据指标总览栏 (Stats Header, 46px)
+        self.stats_header = CardStatsHeader(self)
+        main_layout.addWidget(self.stats_header)
 
-        # 3. 核心 64 块表格主体
+        # 3. 扇区全景雷达与图例一体化栏 (Radar Bar, 32px)
+        self.radar_bar = SectorRadarBar(self)
+        self.radar_bar.sig_sector_selected.connect(self._on_sector_radar_clicked)
+        main_layout.addWidget(self.radar_bar)
+
+        # 4. 核心工作区分割器 (左侧表格 + 右侧 Live Inspector)
+        self.work_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.work_splitter.setChildrenCollapsible(False)
+
+        # 左侧表格
         self.table = QTableWidget()
         self.table.setColumnCount(19)
         headers = ["扇区", "块号"] + [f"{i:02X}" for i in range(16)] + ["ASCII 字符预览"]
         self.table.setHorizontalHeaderLabels(headers)
         self.table.setRowCount(64)
 
-        # 启用双击就地编辑
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.table.verticalHeader().setVisible(False)
         self.table.setFont(QFont("Consolas", 9))
+        self.table.setShowGrid(True)
+        self.table.setStyleSheet("""
+            QTableWidget {
+                background-color: #0B1120;
+                gridline-color: #1E293B;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                selection-background-color: #0284C7;
+                selection-color: #FFFFFF;
+            }
+            QHeaderView::section {
+                background-color: #1E293B;
+                color: #94A3B8;
+                padding: 3px;
+                border: none;
+                font-weight: bold;
+                font-family: Consolas;
+                font-size: 11px;
+            }
+        """)
+        # 解除 Qt 对最小行高的强制限制 (允许 2px 的精细分界线)
+        self.table.verticalHeader().setDefaultSectionSize(24)
+        self.table.verticalHeader().setMinimumSectionSize(2)
 
-        # 绑定单元格修改事件，实时回写 dump_model
+        # 单元格改变与选择联动
         self.table.cellChanged.connect(self._on_cell_changed)
+        self.table.itemSelectionChanged.connect(self._on_table_selection_changed)
 
-        # 列宽调整 (紧凑自适应排版，保证低分辨率小屏幕与高缩放下不重叠、不折叠)
+        # 水平列宽配置与水平滚动条启用 (绝不强行 Stretch 最后一列导致截断)
         header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(0, 42)
+        self.table.setColumnWidth(0, 44)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(1, 42)
         for i in range(2, 18):
             header.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
             self.table.setColumnWidth(i, 28)
-        header.setSectionResizeMode(18, QHeaderView.ResizeMode.Stretch)
-        header.setMinimumSectionSize(26)
+        # 第 18 列 ASCII 预览列：设置交互式自适应模式，默认 140px，完整展示 16 字符
+        header.setSectionResizeMode(18, QHeaderView.ResizeMode.Interactive)
+        self.table.setColumnWidth(18, 140)
+
+        # 启用水平与垂直滚动条
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
-        layout.addWidget(self.table)
+        self.work_splitter.addWidget(self.table)
 
-        # 4. 底部进度条与状态面板
+        # 右侧实时数据智能解析器
+        self.inspector = LiveBlockInspector(self)
+        self.inspector.sig_block_modified.connect(self._on_inspector_block_modified)
+        self.inspector.sig_toggle_collapse.connect(self._toggle_inspector_panel)
+        self.inspector.sig_manual_decrypt.connect(self._on_manual_decrypt)
+        self.work_splitter.addWidget(self.inspector)
+
+        # 比例分配 (表格宽 680, Inspector 宽 280)
+        self.work_splitter.setStretchFactor(0, 3)
+        self.work_splitter.setStretchFactor(1, 1)
+        self.work_splitter.setSizes([680, 280])
+        main_layout.addWidget(self.work_splitter, 1)
+
+        # 5. 底部操作进度面板
         self.progress_panel = QFrame()
         self.progress_panel.setStyleSheet(
             "background-color: #1E293B; border-radius: 6px; padding: 4px;"
@@ -227,31 +359,96 @@ class SectorTableWidget(QWidget):
         p_layout.addWidget(self.btn_abort)
         self.progress_panel.setVisible(False)
 
-        layout.addWidget(self.progress_panel)
+        main_layout.addWidget(self.progress_panel)
 
+        # 初始化渲染
         self.refresh_table()
 
-    def _make_legend(self, text: str, bg_color: str, text_color: str) -> QLabel:
-        lbl = QLabel(f" {text} ")
-        lbl.setStyleSheet(
-            f"background-color: {bg_color}; color: {text_color}; border-radius: 3px; font-size: 11px; padding: 2px 6px;"
-        )
-        return lbl
+    def _toggle_inspector_panel(self):
+        visible = not self.inspector.isVisible()
+        self.inspector.setVisible(visible)
+        self.btn_toggle_inspector.setText("🔍 数据解析器 [展开]" if not visible else "🔍 数据解析器 [收起]")
+
+    def row_for_block(self, block_idx: int) -> int:
+        if 0 <= block_idx < len(self._block_to_row):
+            return self._block_to_row[block_idx]
+        return block_idx
 
     def set_dump(self, dump: MifareDump):
         self.dump = dump
         self.refresh_table()
 
     def update_uid(self, uid_bytes: bytes):
-        """刷卡感应捕获时同步 Block 0 UID"""
         self.dump.set_uid(uid_bytes)
         self.refresh_table()
 
+    def _on_sector_radar_clicked(self, sec: int):
+        first_b = self.dump.get_sector_first_block(sec)
+        row = self.row_for_block(first_b)
+        item = self.table.item(row, 0)
+        if item:
+            self.table.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtTop)
+            self.table.selectRow(row)
+
+    def _on_table_selection_changed(self):
+        items = self.table.selectedItems()
+        if not items:
+            return
+        row = items[0].row()
+        block_idx = self._row_map[row] if 0 <= row < len(self._row_map) else None
+        if block_idx is not None:
+            self.inspector.inspect_block(block_idx, self.dump)
+
+    def _on_inspector_block_modified(self, block_idx: int, data: bytes):
+        """Inspector 工具修改了块数据，同步回 dump 并更新视图"""
+        self.dump.set_block(block_idx, data)
+        self.dump.set_block_state(block_idx, BlockState.READ_OK)
+        self.refresh_table()
+        self.inspector.inspect_block(block_idx, self.dump)
+
     def refresh_table(self):
-        """刷新整张表格渲染 (支持未读取 '-'、原样读取十六进制与加密受限 '??')"""
+        """刷新整张表格渲染，并联动刷新 KPI 统计、扇区雷达与 Inspector"""
         self._updating_table = True
-        self.table.setRowCount(self.dump.block_count)
-        for block_idx in range(self.dump.block_count):
+        self.table.clearSpans()
+
+        total_blocks = self.dump.block_count
+        num_sectors = max(1, total_blocks // 4 if not self.dump.is_4k else self.dump.sector_count)
+
+        row_map = []
+        block_to_row = [0] * total_blocks
+        for s in range(num_sectors):
+            b_cnt = self.dump.get_sector_block_count(s)
+            first_b = self.dump.get_sector_first_block(s)
+            for k in range(b_cnt):
+                b = first_b + k
+                if b >= total_blocks:
+                    break
+                block_to_row[b] = len(row_map)
+                row_map.append(b)
+            if s != num_sectors - 1:
+                row_map.append(None)
+        self._row_map = row_map
+        self._block_to_row = block_to_row
+        self.table.setRowCount(len(row_map))
+
+        bg_b0, fg_b0 = QColor("#3D2B1F"), QColor("#FFB300")
+        bg_data, fg_data = QColor("#1E293B"), QColor("#E2E8F0")
+        bg_trailer, fg_trailer = QColor("#0C2B45"), QColor("#7DD3FC")
+        # 扇区微细分割线：使用优雅深蓝灰色，消除突兀大空白
+        bg_sep = QColor("#334155")
+
+        for row, block_idx in enumerate(row_map):
+            if block_idx is None:
+                self.table.setSpan(row, 0, 1, 19)
+                sep = QTableWidgetItem("")
+                sep.setBackground(bg_sep)
+                sep.setFlags(Qt.ItemFlag.NoItemFlags)
+                self.table.setItem(row, 0, sep)
+                # 精致 2 像素微细分界线
+                self.table.setRowHeight(row, 2)
+                continue
+
+            self.table.setRowHeight(row, 24)
             sector_idx = self.dump.get_block_sector(block_idx)
             trailer_block = self.dump.get_sector_trailer_block(sector_idx)
             is_trailer = (block_idx == trailer_block)
@@ -259,14 +456,11 @@ class SectorTableWidget(QWidget):
             state = self.dump.get_block_state(block_idx)
 
             if is_block0:
-                bg = QColor("#2A1F10")
-                fg = QColor("#FFD54F")
+                bg, fg = bg_b0, fg_b0
             elif is_trailer:
-                bg = QColor("#0F172A")
-                fg = QColor("#38BDF8")
+                bg, fg = bg_trailer, fg_trailer
             else:
-                bg = QColor("#1E293B") if (sector_idx % 2 == 0) else QColor("#182234")
-                fg = QColor("#E2E8F0")
+                bg, fg = bg_data, fg_data
 
             # 扇区编号 (只读)
             item_sec = QTableWidgetItem(f"S{sector_idx:02d}")
@@ -274,7 +468,7 @@ class SectorTableWidget(QWidget):
             item_sec.setBackground(bg)
             item_sec.setForeground(fg)
             item_sec.setFlags(item_sec.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(block_idx, 0, item_sec)
+            self.table.setItem(row, 0, item_sec)
 
             # 块编号 (只读)
             item_blk = QTableWidgetItem(f"B{block_idx:02d}")
@@ -282,9 +476,9 @@ class SectorTableWidget(QWidget):
             item_blk.setBackground(bg)
             item_blk.setForeground(fg)
             item_blk.setFlags(item_blk.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(block_idx, 1, item_blk)
+            self.table.setItem(row, 1, item_blk)
 
-            # 16 字节数据 (根据块状态精准渲染：未读 "-" / 读出原样 Hex / 加密不可读 "??")
+            # 16 字节数据
             block_data = self.dump.get_block(block_idx)
             for b in range(16):
                 item_byte = QTableWidgetItem()
@@ -292,17 +486,14 @@ class SectorTableWidget(QWidget):
                 item_byte.setBackground(bg)
 
                 if state == BlockState.UNREAD:
-                    # 未读取 / 未载入: 呈现 "-" 占位，柔和暗灰色，绝不显示误导性的 00
                     item_byte.setText("-")
                     item_byte.setForeground(QColor("#64748B"))
-                    item_byte.setToolTip(f"S{sector_idx:02d} B{block_idx:02d} 字节[{b:02X}]: 尚未读取，双击可直接就地编辑修改")
+                    item_byte.setToolTip(f"S{sector_idx:02d} B{block_idx:02d} 字节[{b:02X}]: 尚未读取，双击可直接编辑修改")
                 elif state == BlockState.READ_FAILED:
-                    # 加密扇区读不出 / 认证失败: 无歧义呈现 "??"，珊瑚红警示
                     item_byte.setText("??")
                     item_byte.setForeground(QColor("#F87171"))
-                    item_byte.setToolTip(f"S{sector_idx:02d} B{block_idx:02d} 字节[{b:02X}]: 扇区加密受保护或未命中密钥，无法读取")
+                    item_byte.setToolTip(f"S{sector_idx:02d} B{block_idx:02d} 字节[{b:02X}]: 扇区加密受保护或未命中密钥")
                 else:
-                    # 真实读取成功 / 已载入文件 / 用户已编辑: 原样展示实际 Hex 字节
                     val = block_data[b]
                     item_byte.setText(f"{val:02X}")
                     if is_trailer:
@@ -316,9 +507,9 @@ class SectorTableWidget(QWidget):
                         item_byte.setForeground(fg)
                     item_byte.setToolTip(f"S{sector_idx:02d} B{block_idx:02d} 字节[{b:02X}]: 0x{val:02X} (十进制 {val})")
 
-                self.table.setItem(block_idx, 2 + b, item_byte)
+                self.table.setItem(row, 2 + b, item_byte)
 
-            # ASCII 文本预览 (只读)
+            # ASCII 文本预览
             if state == BlockState.UNREAD:
                 asc_str = "-"
                 asc_fg = QColor("#64748B")
@@ -333,15 +524,29 @@ class SectorTableWidget(QWidget):
             item_asc.setBackground(bg)
             item_asc.setForeground(asc_fg)
             item_asc.setFlags(item_asc.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(block_idx, 18, item_asc)
+            self.table.setItem(row, 18, item_asc)
 
         self._updating_table = False
 
+        # 联动刷新 KPI 指标看板与扇区雷达地图
+        stats = calculate_dump_statistics(self.dump)
+        self.stats_header.update_stats(stats)
+        self.radar_bar.update_radar(stats["sector_states"])
+
+        # 联动刷新 Inspector 面板
+        selected_block = self.inspector.current_block_idx
+        if selected_block >= self.dump.block_count:
+            selected_block = 0
+        self.inspector.inspect_block(selected_block, self.dump)
+
     def _on_cell_changed(self, row: int, col: int):
-        """处理单元格直接就地编辑修改"""
         if self._updating_table:
             return
         if not (2 <= col <= 17):
+            return
+
+        block_idx = self._row_map[row] if 0 <= row < len(self._row_map) else None
+        if block_idx is None:
             return
 
         item = self.table.item(row, col)
@@ -351,52 +556,64 @@ class SectorTableWidget(QWidget):
         byte_idx = col - 2
         text = item.text().strip().upper()
 
-        # 校验合法十六进制单字节
         try:
             val = int(text, 16)
             if not (0 <= val <= 255):
                 raise ValueError()
         except ValueError:
-            # 还原为原值或根据状态还原
-            state = self.dump.get_block_state(row)
+            state = self.dump.get_block_state(block_idx)
             self._updating_table = True
             if state == BlockState.UNREAD:
                 item.setText("-")
             elif state == BlockState.READ_FAILED:
                 item.setText("??")
             else:
-                original = self.dump.get_block(row)[byte_idx]
+                original = self.dump.get_block(block_idx)[byte_idx]
                 item.setText(f"{original:02X}")
             self._updating_table = False
             return
 
-        # 格式化展示为大写 2 位 Hex
         formatted = f"{val:02X}"
         self._updating_table = True
         item.setText(formatted)
         item.setForeground(QColor("#E2E8F0"))
         self._updating_table = False
 
-        # 同步回 dump 模型并标记该块为已读取/已编辑
-        block_bytes = bytearray(self.dump.get_block(row))
+        block_bytes = bytearray(self.dump.get_block(block_idx))
         block_bytes[byte_idx] = val
-        self.dump.set_block(row, bytes(block_bytes))
-        self.dump.set_block_state(row, BlockState.READ_OK)
+        self.dump.set_block(block_idx, bytes(block_bytes))
+        self.dump.set_block_state(block_idx, BlockState.READ_OK)
 
-        # 更新同行的 ASCII 预览
         asc_str = "".join(chr(x) if 32 <= x <= 126 else "." for x in block_bytes)
         item_asc = self.table.item(row, 18)
         if item_asc:
             item_asc.setText(asc_str)
             item_asc.setForeground(QColor("#E2E8F0"))
 
-        # 视觉高亮标记已修改
         item.setBackground(QColor("#065F46"))
+
+        # 联动更新 Inspector 与 Stats
+        self.inspector.inspect_block(block_idx, self.dump)
+        stats = calculate_dump_statistics(self.dump)
+        self.stats_header.update_stats(stats)
+        self.radar_bar.update_radar(stats["sector_states"])
+
+    def _on_card_model_changed(self, index: int):
+        target_4k = (index == 1)
+        if self.dump.is_4k != target_4k:
+            new_dump = MifareDump(is_4k=target_4k)
+            copy_blocks = min(self.dump.block_count, new_dump.block_count)
+            for b in range(copy_blocks):
+                new_dump.set_block(b, self.dump.get_block(b))
+                new_dump.set_block_state(b, self.dump.get_block_state(b))
+            self.dump = new_dump
+            self.refresh_table()
 
     # -------------------------------------------------------------
     # 异步卡片交互工作流
     # -------------------------------------------------------------
-    def _start_worker(self, op_type: str, dump_to_write=None, allow_b0=False, custom_keys=None, concurrency=4):
+    def _start_worker(self, op_type: str, dump_to_write=None, allow_b0=False, custom_keys=None,
+                      concurrency=1, target_sectors=None, manual_key=None, magic_type="CUID", is_4k=None):
         if not self.serial_worker or not self.serial_worker.is_connected():
             QMessageBox.warning(self, "未连接", "请先在左侧连接读卡器串口！")
             return
@@ -409,18 +626,26 @@ class SectorTableWidget(QWidget):
         self.progress_bar.setValue(0)
         self.lbl_progress.setText(f"正在准备: {op_type}...")
 
+        is_4k_effective = is_4k if is_4k is not None else self.dump.is_4k
+
         self.card_op_worker = CardOperationWorker(
             worker=self.serial_worker,
             op_type=op_type,
+            target_sectors=target_sectors,
             dump_to_write=dump_to_write,
             allow_block0_write=allow_b0,
             custom_keys=custom_keys,
             concurrency=concurrency,
+            manual_key=manual_key,
+            magic_type=magic_type,
+            is_4k=is_4k_effective,
             parent=self
         )
         self.card_op_worker.sig_progress.connect(self._on_worker_progress)
         self.card_op_worker.sig_log.connect(lambda msg: self.sig_notify.emit(msg))
         self.card_op_worker.sig_block_read.connect(self._on_worker_block_read)
+        self.card_op_worker.sig_block_failed.connect(self._on_worker_block_failed)
+        self.card_op_worker.sig_sector_cracked.connect(self._on_worker_sector_cracked)
         self.card_op_worker.sig_finished.connect(self._on_worker_finished)
         self.card_op_worker.start()
 
@@ -430,28 +655,61 @@ class SectorTableWidget(QWidget):
 
     def _on_worker_block_read(self, block_idx: int, data: bytes):
         self.dump.set_block(block_idx, data)
-        # 单块更新表格局部渲染
+        self.dump.set_block_state(block_idx, BlockState.READ_OK)
+        row = self._block_to_row[block_idx] if block_idx < len(self._block_to_row) else block_idx
         self._updating_table = True
         for b in range(16):
-            it = self.table.item(block_idx, 2 + b)
+            it = self.table.item(row, 2 + b)
             if it:
                 it.setText(f"{data[b]:02X}")
-        it_asc = self.table.item(block_idx, 18)
+        it_asc = self.table.item(row, 18)
         if it_asc:
             it_asc.setText("".join(chr(x) if 32 <= x <= 126 else "." for x in data))
         self._updating_table = False
+
+    def _on_worker_block_failed(self, block_idx: int):
+        """读卡/解密过程中某块认证失败，实时更新单元格为 '??' 保持实时动画流动感"""
+        self.dump.set_block_state(block_idx, BlockState.READ_FAILED)
+        row = self._block_to_row[block_idx] if block_idx < len(self._block_to_row) else block_idx
+        self._updating_table = True
+        for b in range(16):
+            it = self.table.item(row, 2 + b)
+            if it:
+                it.setText("??")
+                it.setForeground(QColor("#F87171"))
+        it_asc = self.table.item(row, 18)
+        if it_asc:
+            it_asc.setText("[加密受限]")
+            it_asc.setForeground(QColor("#F87171"))
+        self._updating_table = False
+
+    def _on_worker_sector_cracked(self, sector: int, key_a: str, key_b: str):
+        """破解/读取成功某扇区密钥 -> 留存至数据库"""
+        self._persist_sector_keys(sector, key_a, key_b)
 
     def _on_worker_finished(self, success: bool, msg: str, result_data):
         self.progress_panel.setVisible(False)
         if isinstance(result_data, MifareDump):
             self.dump = result_data
+            uid = self.dump.get_uid()
+            if uid and any(b != 0 for b in uid):
+                from core.models.card_converter import CardConverter
+                card_info = {
+                    "uid_bytes": uid,
+                    "conversions": CardConverter.convert_uid(uid),
+                    "raw": self.dump.get_block(0),
+                    "card_type": "Mifare Classic 1K" if not self.dump.is_4k else "Mifare Classic 4K",
+                }
+                if self.serial_worker and hasattr(self.serial_worker, "sig_card_swiped"):
+                    self.serial_worker.sig_card_swiped.emit(card_info)
         self.refresh_table()
+        if self.inspector.current_dump is not None:
+            self.inspector.inspect_block(self.inspector.current_block_idx, self.dump)
 
         if success:
             QMessageBox.information(self, "操作完成", msg)
         else:
             QMessageBox.warning(self, "操作结果", msg)
-
 
     def _on_abort_operation(self):
         if self.card_op_worker and self.card_op_worker.isRunning():
@@ -459,7 +717,6 @@ class SectorTableWidget(QWidget):
             self.lbl_progress.setText("正在中止...")
 
     def _on_configure_keys(self):
-        """打开字典选择与并发配置对话框"""
         from ui.key_select_dialog import KeySelectDialog
         dialog = KeySelectDialog(self, initial_selected=self._selected_key_files, concurrency=self._concurrency)
         if dialog.exec():
@@ -469,17 +726,36 @@ class SectorTableWidget(QWidget):
             QMessageBox.information(
                 self, "字典配置更新",
                 f"已配置加载 {len(self._selected_key_files)} 个字典文件，共计 {len(self._selected_keys):,} 条去重有效密钥。\n"
-                f"并发解密线程数: {self._concurrency} 线程。"
+                f"扫描模式: 单线程顺序扫描 (射频半双工)。"
             )
 
     def _on_read_card(self):
         from core.key_manager import KeyManager
-        keys = self._selected_keys if self._selected_keys else KeyManager.load_combined_keys()
-        concurrency = self._concurrency if hasattr(self, "_concurrency") else 4
+        keys = list(self._selected_keys) if self._selected_keys else KeyManager.load_combined_keys()
+
+        # 优先读取并合并该卡在数据库中此前已破解留存的历史已知密钥 (置顶优先命中)
+        card_uid_hex = self.dump.get_uid().hex().upper() if self.dump.get_uid() else ""
+        if self.db and card_uid_hex:
+            saved_keys = self.db.get_card_keys(card_uid_hex)
+            db_keys = []
+            for s_info in saved_keys.values():
+                ka = s_info.get("key_a", "")
+                kb = s_info.get("key_b", "")
+                if ka and len(ka) == 12 and ka not in db_keys and ka != "未破解":
+                    db_keys.append(ka)
+                if kb and len(kb) == 12 and kb not in db_keys and kb != "未破解":
+                    db_keys.append(kb)
+            if db_keys:
+                keys = db_keys + [k for k in keys if k not in db_keys]
+
+        is_4k = (self.cmb_card_model.currentIndex() == 1) or self.dump.is_4k
+        target_sectors = list(range(40 if is_4k else 16))
         self._start_worker(
             CardOperationWorker.OP_READ_CARD,
             custom_keys=keys,
-            concurrency=concurrency
+            concurrency=1,
+            target_sectors=target_sectors,
+            is_4k=is_4k
         )
 
     def _on_write_card(self):
@@ -491,34 +767,105 @@ class SectorTableWidget(QWidget):
         )
         if reply == QMessageBox.StandardButton.Yes:
             allow_b0 = not self.chk_protect_b0.isChecked()
+            magic_type = "GEN1A" if "GEN1A" in self.cmb_magic_type.currentText().upper() else "CUID"
             self._start_worker(
                 CardOperationWorker.OP_WRITE_CARD,
                 dump_to_write=self.dump,
-                allow_b0=allow_b0
+                allow_b0=allow_b0,
+                magic_type=magic_type,
+                is_4k=self.dump.is_4k
             )
 
     def _on_crack_keys(self):
         from ui.key_select_dialog import KeySelectDialog
+        from ui.crack_dialogs import SectorScopeDialog
+
+        # 1. 先选择字典
         dialog = KeySelectDialog(self, initial_selected=self._selected_key_files, concurrency=self._concurrency)
-        if dialog.exec():
-            self._selected_key_files = dialog.get_selected_files()
-            self._concurrency = dialog.get_concurrency()
-            self._selected_keys = dialog.get_selected_keys()
-            if not self._selected_keys:
-                QMessageBox.warning(self, "未选择字典", "未找到有效密钥，请至少勾选一个包含有效密钥的字典文件！")
-                return
-            self._start_worker(
-                CardOperationWorker.OP_CRACK_KEYS,
-                custom_keys=self._selected_keys,
-                concurrency=self._concurrency
-            )
+        if not dialog.exec():
+            return
+        self._selected_key_files = dialog.get_selected_files()
+        self._concurrency = dialog.get_concurrency()
+        self._selected_keys = dialog.get_selected_keys()
+        if not self._selected_keys:
+            QMessageBox.warning(self, "未选择字典", "未找到有效密钥，请至少勾选一个包含有效密钥的字典文件！")
+            return
+
+        # 2. 再选择参与破解的扇区 (默认勾选全部被加密扇区)
+        scope = SectorScopeDialog(self, dump=self.dump)
+        if not scope.exec():
+            return
+        target_sectors = scope.get_selected_sectors()
+        if not target_sectors:
+            QMessageBox.warning(self, "未选择扇区", "请至少勾选一个待破解的扇区！")
+            return
+
+        is_4k = (self.cmb_card_model.currentIndex() == 1) or self.dump.is_4k or (max(target_sectors) >= 16)
+        self._start_worker(
+            CardOperationWorker.OP_CRACK_KEYS,
+            custom_keys=self._selected_keys,
+            concurrency=self._concurrency,
+            target_sectors=target_sectors,
+            is_4k=is_4k
+        )
+
+    def _on_manual_decrypt(self, block_idx: int):
+        """数据解析器: 手动输入密钥对指定块所属扇区进行测试解密"""
+        from ui.crack_dialogs import ManualKeyDialog
+
+        if not self.serial_worker or not self.serial_worker.is_connected():
+            QMessageBox.warning(self, "未连接", "请先在左侧连接读卡器串口！")
+            return
+
+        sector = self.dump.get_block_sector(block_idx)
+        # 若数据库已留存该卡该扇区密钥, 作为输入建议
+        sugg_a = sugg_b = ""
+        if self.db:
+            try:
+                uid = self.dump.get_block(0)[:4].hex().upper()
+                saved = self.db.get_card_keys(uid).get(sector, {})
+                sugg_a = saved.get("key_a", "")
+                sugg_b = saved.get("key_b", "")
+            except Exception:
+                pass
+
+        dlg = ManualKeyDialog(self, block_idx=block_idx, sector=sector,
+                              suggestion_a=sugg_a, suggestion_b=sugg_b)
+        if not dlg.exec():
+            return
+
+        key_hex = dlg.get_key_hex()
+        try:
+            key_bytes = bytes.fromhex(key_hex)
+        except ValueError:
+            QMessageBox.warning(self, "格式错误", "密钥解析失败！")
+            return
+
+        self._start_worker(
+            CardOperationWorker.OP_READ_SECTOR,
+            target_sectors=[sector],
+            manual_key={"key_type": dlg.get_key_type(), "key": key_bytes}
+        )
 
     def _on_probe_firmware(self):
         self._start_worker(CardOperationWorker.OP_PROBE_FIRMWARE)
 
-    # -------------------------------------------------------------
-    # 全卡校验与字典工具
-    # -------------------------------------------------------------
+    def _on_open_clone_wizard(self):
+        from ui.clone_wizard_dialog import CloneWizardDialog
+        dlg = CloneWizardDialog(self.serial_worker, card_db=self.card_db, parent=self)
+        dlg.sig_card_cloned.connect(self._on_card_cloned)
+        dlg.exec()
+
+    def _on_card_cloned(self, dump: MifareDump):
+        self.dump = dump
+        self.refresh_table()
+        self.sig_notify.emit("✨ 一键克隆卡片成功！已加载克隆数据到扇区表。")
+
+    def _on_open_magic_tools(self):
+        from ui.magic_card_dialog import MagicCardDialog
+        dlg = MagicCardDialog(self.serial_worker, current_dump=self.dump, parent=self)
+        dlg.exec()
+
     def _on_check_card(self):
         res = self.dump.verify_dump()
         if res["valid"]:
@@ -551,9 +898,27 @@ class SectorTableWidget(QWidget):
             count = self.dump.export_key_dictionary(path)
             QMessageBox.information(self, "导出成功", f"已成功提取并导出 {count} 条去重密钥至:\n{path}")
 
-    # -------------------------------------------------------------
-    # 文件导入导出
-    # -------------------------------------------------------------
+    def load_dump_from_path(self, path: str) -> bool:
+        """从指定路径直接载入卡片 Dump 数据并刷新界面与状态"""
+        if self.dump.load_from_file(path):
+            self.cmb_card_model.blockSignals(True)
+            self.cmb_card_model.setCurrentIndex(1 if self.dump.is_4k else 0)
+            self.cmb_card_model.blockSignals(False)
+            self.refresh_table()
+            uid = self.dump.get_uid()
+            if uid and any(b != 0 for b in uid):
+                from core.models.card_converter import CardConverter
+                card_info = {
+                    "uid_bytes": uid,
+                    "conversions": CardConverter.convert_uid(uid),
+                    "raw": self.dump.get_block(0),
+                    "card_type": "Mifare Classic 1K" if not self.dump.is_4k else "Mifare Classic 4K",
+                }
+                if self.serial_worker and hasattr(self.serial_worker, "sig_card_swiped"):
+                    self.serial_worker.sig_card_swiped.emit(card_info)
+            return True
+        return False
+
     def _on_load_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -567,8 +932,7 @@ class SectorTableWidget(QWidget):
             "所有文件 (*.*)"
         )
         if path:
-            if self.dump.load_from_file(path):
-                self.refresh_table()
+            if self.load_dump_from_path(path):
                 QMessageBox.information(self, "导入成功", "已成功载入文件:\n" + path)
             else:
                 err_detail = self.dump.load_error_message or "文件格式不匹配或数据损坏"
@@ -624,4 +988,3 @@ class SectorTableWidget(QWidget):
         elif clicked == btn_factory:
             self.dump.reset_factory_default(keep_state_unread=False)
             self.refresh_table()
-

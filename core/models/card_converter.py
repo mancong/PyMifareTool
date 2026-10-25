@@ -4,11 +4,49 @@ PyMifareTool - 卡号格式多行业标准换算模型 (CardConverter)
 针对 4 / 7 / 8 / 10 字节物理 UID 进行正序、倒序、8H10D、门禁韦根 WG26/34 换算
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 
 class CardConverter:
-    """针对 4/7/8/10 字节 UID 进行全行业常见格式换算"""
+    """针对 4/7/8/10 字节 UID 进行全行业常见格式换算，并提供 Block 0 厂商块智能装配"""
+
+    @staticmethod
+    def generate_random_uid(length: int = 4) -> bytes:
+        """生成随机物理卡号 UID (避免以 0x00 或 0x88 级联符开头)"""
+        import os
+        b = bytearray(os.urandom(length))
+        while b[0] in (0x00, 0x88):
+            b[0] = os.urandom(1)[0]
+        return bytes(b)
+
+    @staticmethod
+    def build_block0(
+        uid: bytes,
+        sak: int = 0x08,
+        atqa: Any = b"\x04\x00",
+        manufacturer_data: Optional[bytes] = None
+    ) -> bytes:
+        """
+        根据提供的 UID 与射频参数构建标准的 16 字节 Block 0 (厂商数据块)
+        4字节UID结构: [4B UID] [1B BCC] [1B SAK] [2B ATQA] [8B 厂商数据]
+        """
+        if isinstance(atqa, int):
+            atqa_2b = atqa.to_bytes(2, "big")
+        elif isinstance(atqa, (bytes, bytearray)):
+            atqa_2b = bytes(atqa[:2]) if len(atqa) >= 2 else bytes(atqa).ljust(2, b"\x00")
+        else:
+            atqa_2b = b"\x04\x00"
+
+        if len(uid) == 4:
+            bcc = uid[0] ^ uid[1] ^ uid[2] ^ uid[3]
+            mfg = manufacturer_data if (manufacturer_data and len(manufacturer_data) == 8) else bytes.fromhex("6263646566676869")
+            return uid + bytes([bcc, sak & 0xFF]) + atqa_2b + mfg
+        elif len(uid) == 7:
+            bcc = uid[3] ^ uid[4] ^ uid[5] ^ uid[6]
+            mfg = manufacturer_data if (manufacturer_data and len(manufacturer_data) == 5) else bytes.fromhex("0804000102")
+            return uid + bytes([bcc, sak & 0xFF]) + atqa_2b + mfg
+        else:
+            raise ValueError(f"不支持的 UID 长度: {len(uid)} 字节 (仅支持 4 或 7 字节)")
 
     @staticmethod
     def convert_uid(uid: bytes) -> Dict[str, Any]:

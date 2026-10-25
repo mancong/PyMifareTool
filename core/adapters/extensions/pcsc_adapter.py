@@ -7,6 +7,7 @@ PyMifareTool - PC/SC 智能卡读写器驱动扩展骨架 (ACR122U / CCID USB Re
 
 from typing import Optional, Dict, Any, Tuple
 from core.adapters.base_adapter import BaseReaderAdapter
+from core.transport.base import TransportLike
 
 
 class PCSCReaderAdapter(BaseReaderAdapter):
@@ -23,7 +24,7 @@ class PCSCReaderAdapter(BaseReaderAdapter):
         self.firmware_info = "PC/SC CCID Driver"
         self._connection = None
 
-    def init_device(self, ser=None) -> bool:
+    def init_device(self, ser: Optional[TransportLike] = None) -> bool:
         """检查 PC/SC 服务环境与读卡器上下文"""
         return True
 
@@ -31,25 +32,25 @@ class PCSCReaderAdapter(BaseReaderAdapter):
         """PC/SC 为事务请求-应答模型，通常不依赖被动流解析"""
         return None, bytes(rx_buffer)
 
-    def poll_card(self, ser=None, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
+    def poll_card(self, ser: Optional[TransportLike] = None, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
         """
         通过 APDU FF CA 00 00 00 获取卡片 UID (Get Card UID)
         """
         return None
 
-    def authenticate(self, ser, block: int, key_type: str, key: bytes, uid: bytes = b"", timeout: float = 0.35) -> bool:
+    def authenticate(self, ser: Optional[TransportLike], block: int, key_type: str, key: bytes, uid: bytes = b"", timeout: float = 0.35) -> bool:
         """
         通过 APDU FF 86 00 00 05 01 00 [Block] [KeyType] 00 进行 PC/SC 扇区认证
         """
         return False
 
-    def read_block(self, ser, block: int, timeout: float = 0.35) -> Optional[bytes]:
+    def read_block(self, ser: Optional[TransportLike], block: int, timeout: float = 0.35) -> Optional[bytes]:
         """
         通过 APDU FF B0 00 [Block] 10 读取 16 字节物理块
         """
         return None
 
-    def write_block(self, ser, block: int, data: bytes, timeout: float = 0.35) -> bool:
+    def write_block(self, ser: Optional[TransportLike], block: int, data: bytes, timeout: float = 0.35) -> bool:
         """
         通过 APDU FF D6 00 [Block] 10 [16B Data] 写入 16 字节物理块
         """

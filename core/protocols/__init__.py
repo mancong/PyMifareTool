@@ -8,6 +8,7 @@ from .base import BaseProtocolCodec, ProtocolError, FrameChecksumError, FrameInc
 from .aabb import AABBProtocol, ReaderProtocol
 from .pn532 import PN532Protocol
 from .iso14443b import ISO14443BProtocol, calculate_crc_b, CIU_REGISTERS_TYPE_B_ID
+from .iso7816 import APDUProtocol, SW_DESCRIPTIONS, AID_T_UNION, AID_PBOC_CASH
 
 __all__ = [
     "BaseProtocolCodec",
@@ -20,4 +21,8 @@ __all__ = [
     "ISO14443BProtocol",
     "calculate_crc_b",
     "CIU_REGISTERS_TYPE_B_ID",
+    "APDUProtocol",
+    "SW_DESCRIPTIONS",
+    "AID_T_UNION",
+    "AID_PBOC_CASH",
 ]

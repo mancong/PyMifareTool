@@ -19,13 +19,18 @@ from ui.main_window import MainWindow
 def main():
     # 针对 Windows 高分辨率屏幕 (High DPI) 开启自适应平滑缩放
     os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
-    
-    app = QApplication(sys.argv)
     if hasattr(Qt.HighDpiScaleFactorRoundingPolicy, "PassThrough"):
-        app.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+        QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+
+    app = QApplication(sys.argv)
 
     app.setApplicationName("PyMifareTool")
     app.setApplicationVersion("1.0.0")
+
+    font = app.font()
+    if font.pointSizeF() <= 0 and font.pixelSize() <= 0:
+        font.setPointSize(10)
+        app.setFont(font)
 
     window = MainWindow()
     window.show()

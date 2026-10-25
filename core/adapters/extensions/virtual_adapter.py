@@ -8,6 +8,7 @@ PyMifareTool - 内存虚拟卡读写器适配器 (VirtualDumpReaderAdapter)
 from typing import Optional, Dict, Any, Tuple
 from core.adapters.base_adapter import BaseReaderAdapter
 from core.models.dump import MifareDump
+from core.transport.base import TransportLike
 from core.models.card_converter import CardConverter
 
 
@@ -32,14 +33,14 @@ class VirtualDumpReaderAdapter(BaseReaderAdapter):
         self.dump = dump
         self._authenticated_sectors.clear()
 
-    def init_device(self, ser=None) -> bool:
+    def init_device(self, ser: Optional[TransportLike] = None) -> bool:
         self._authenticated_sectors.clear()
         return True
 
     def parse_incoming(self, rx_buffer: bytearray) -> Tuple[Optional[Dict[str, Any]], bytes]:
         return None, bytes(rx_buffer)
 
-    def poll_card(self, ser=None, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
+    def poll_card(self, ser: Optional[TransportLike] = None, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
         """从挂载的虚拟 Dump 中提取 Block 0 UID 进行卡片呈现"""
         b0 = self.dump.get_block(0)
         uid_bytes = b0[:4]
@@ -54,7 +55,7 @@ class VirtualDumpReaderAdapter(BaseReaderAdapter):
             "device_model": "VirtualReader",
         }
 
-    def authenticate(self, ser, block: int, key_type: str, key: bytes, uid: bytes = b"", timeout: float = 0.35) -> bool:
+    def authenticate(self, ser: Optional[TransportLike], block: int, key_type: str, key: bytes, uid: bytes = b"", timeout: float = 0.35) -> bool:
         """
         验证提供的密钥是否与虚拟卡对应扇区尾块的密钥相符
         """
@@ -77,13 +78,13 @@ class VirtualDumpReaderAdapter(BaseReaderAdapter):
 
         return False
 
-    def read_block(self, ser, block: int, timeout: float = 0.35) -> Optional[bytes]:
+    def read_block(self, ser: Optional[TransportLike], block: int, timeout: float = 0.35) -> Optional[bytes]:
         """读取虚拟卡指定块"""
         if 0 <= block < self.dump.block_count:
             return self.dump.get_block(block)
         return None
 
-    def write_block(self, ser, block: int, data: bytes, timeout: float = 0.35) -> bool:
+    def write_block(self, ser: Optional[TransportLike], block: int, data: bytes, timeout: float = 0.35) -> bool:
         """写入虚拟卡指定块"""
         if 0 <= block < self.dump.block_count and len(data) == 16:
             self.dump.set_block(block, data)

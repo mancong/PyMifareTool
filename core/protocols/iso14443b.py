@@ -37,6 +37,22 @@ CIU_REGISTERS_TYPE_B_ID: List[Tuple[int, int]] = [
     (0x630D, 0x10),  # CIU_ManualRCV: 0x10
 ]
 
+# PN532 出厂默认 CIU 寄存器值 (Type A 正常寻卡状态，二代证读取后必须恢复)
+CIU_REGISTERS_TYPE_A_DEFAULT: List[Tuple[int, int]] = [
+    (0x6301, 0x3B),
+    (0x6302, 0x00),
+    (0x6303, 0x00),
+    (0x6305, 0x00),
+    (0x6308, 0x84),
+    (0x6309, 0x4D),
+    (0x630D, 0x00),
+    (0x630E, 0x00),
+    (0x6314, 0x26),
+    (0x6317, 0x88),
+    (0x6318, 0x20),
+    (0x6319, 0x20),
+]
+
 
 class ISO14443BProtocol:
     """ISO/IEC 14443-B 二代居民身份证协议编解码器"""

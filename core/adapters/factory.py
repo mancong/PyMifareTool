@@ -5,9 +5,9 @@ PyMifareTool - 读卡器适配器工厂与自动探测服务 (ReaderAdapterFacto
 """
 
 import time
-import serial
 from typing import Optional, List, Dict, Type
 from .base_adapter import BaseReaderAdapter
+from core.transport.base import TransportLike
 from .pn532_adapter import PN532Adapter
 from .broadcaster_adapter import BroadcasterAdapter
 
@@ -20,6 +20,7 @@ class ReaderAdapterFactory:
     DEVICE_BROADCASTER = "broadcaster"
     DEVICE_VIRTUAL = "virtual"
     DEVICE_PCSC = "pcsc"
+    DEVICE_LIBNFC = "libnfc"
 
     DEVICE_CHOICES = [
         ("⚡ 自动识别硬件 (推荐)", DEVICE_AUTO),
@@ -52,12 +53,15 @@ class ReaderAdapterFactory:
         elif device_type_key == cls.DEVICE_PCSC:
             from .extensions.pcsc_adapter import PCSCReaderAdapter
             return PCSCReaderAdapter()
+        elif device_type_key == cls.DEVICE_LIBNFC:
+            from .libnfc_adapter import LibnfcCliAdapter
+            return LibnfcCliAdapter()
         else:
             # 默认为 PN532 兼容优先
             return PN532Adapter()
 
     @classmethod
-    def probe_device(cls, ser: serial.Serial, preferred_type: str = DEVICE_AUTO) -> BaseReaderAdapter:
+    def probe_device(cls, ser: TransportLike, preferred_type: str = DEVICE_AUTO) -> BaseReaderAdapter:
         """
         在已打开的串口上自动探测读卡器型号
         优先尝试 PN532 唤醒与固件版本握手
@@ -76,6 +80,12 @@ class ReaderAdapterFactory:
         if preferred_type == cls.DEVICE_VIRTUAL:
             from .extensions.virtual_adapter import VirtualDumpReaderAdapter
             adapter = VirtualDumpReaderAdapter()
+            adapter.init_device(ser)
+            return adapter
+
+        if preferred_type == cls.DEVICE_LIBNFC:
+            from .libnfc_adapter import LibnfcCliAdapter
+            adapter = LibnfcCliAdapter()
             adapter.init_device(ser)
             return adapter
 

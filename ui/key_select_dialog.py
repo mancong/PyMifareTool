@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-PyMifareTool - 密钥字典文件选择与并发解密配置对话框
-支持手动多选 MCT 标准字典 (std.keys, hotel-std.keys, extended-std.keys)、
-导入外部字典以及自定义并发解密线程数 (1 ~ 8 线程)
+PyMifareTool - 密钥字典文件选择与扫描模式配置对话框
+支持手动多选 MCT 标准字典 (std.keys, hotel-std.keys, extended-std.keys) 与导入外部字典；
+射频半双工环境下密钥按优先级顺序单线程扫描。
 """
 
 import os
 from typing import List, Tuple, Dict, Any, Optional
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox,
-    QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QFileDialog,
+    QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog,
     QMessageBox, QFrame, QGroupBox, QAbstractItemView
 )
 from PyQt6.QtCore import Qt
@@ -19,11 +19,11 @@ from core.key_manager import KeyManager
 
 
 class KeySelectDialog(QDialog):
-    """M1 密钥字典多选与并发线程配置对话框"""
+    """M1 密钥字典多选与扫描模式配置对话框"""
 
     def __init__(self, parent=None, initial_selected: Optional[List[str]] = None, concurrency: int = 4):
         super().__init__(parent)
-        self.setWindowTitle("🔑 密钥字典选择与并发配置 (MCT 生态)")
+        self.setWindowTitle("🔑 密钥字典选择与扫描配置 (MCT 生态)")
         self.setMinimumSize(560, 420)
         self.resize(600, 460)
 
@@ -48,8 +48,8 @@ class KeySelectDialog(QDialog):
         b_lay.setContentsMargins(4, 4, 4, 4)
         b_lay.setSpacing(3)
         lbl_title = QLabel("选择用于读卡或字典破解的密钥库 (对标 MifareClassicTool)")
-        lbl_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #38BDF8;")
-        lbl_sub = QLabel("支持勾选 MCT 官方预置字典或载入外部字典，面对大字典时可开启多线程并发加速。")
+        lbl_title.setStyleSheet("font-size: 10pt; font-weight: bold; color: #38BDF8;")
+        lbl_sub = QLabel("支持勾选 MCT 官方预置字典或载入外部字典；密钥将按优先级顺序单线程扫描。")
         lbl_sub.setStyleSheet("font-size: 11px; color: #94A3B8;")
         b_lay.addWidget(lbl_title)
         b_lay.addWidget(lbl_sub)
@@ -71,8 +71,8 @@ class KeySelectDialog(QDialog):
         )
         layout.addWidget(self.table)
 
-        # 中部操作组 (添加外部文件 + 并发线程配置)
-        opt_box = QGroupBox("⚙️ 并发与扩展选项")
+        # 中部操作组 (添加外部文件 + 扫描模式说明)
+        opt_box = QGroupBox("⚙️ 字典扩展选项")
         opt_box.setStyleSheet("QGroupBox { font-weight: bold; color: #34D399; margin-top: 4px; }")
         opt_lay = QHBoxLayout(opt_box)
         opt_lay.setContentsMargins(8, 8, 8, 8)
@@ -85,31 +85,9 @@ class KeySelectDialog(QDialog):
 
         opt_lay.addStretch()
 
-        opt_lay.addWidget(QLabel("并发解密线程:"))
-        self.combo_threads = QComboBox()
-        self.combo_threads.addItems([
-            "4 线程并发 (推荐)",
-            "8 线程并发 (极速模式)",
-            "16 线程并发 (高并发模式)",
-            "32 线程并发 (激进批处理)",
-            "2 线程并发",
-            "1 线程 (单线调试)"
-        ])
-        # 默认选中对应索引
-        if self.concurrency == 32:
-            self.combo_threads.setCurrentIndex(3)
-        elif self.concurrency == 16:
-            self.combo_threads.setCurrentIndex(2)
-        elif self.concurrency == 8:
-            self.combo_threads.setCurrentIndex(1)
-        elif self.concurrency == 2:
-            self.combo_threads.setCurrentIndex(4)
-        elif self.concurrency == 1:
-            self.combo_threads.setCurrentIndex(5)
-        else:
-            self.combo_threads.setCurrentIndex(0)
-
-        opt_lay.addWidget(self.combo_threads)
+        lbl_mode = QLabel("ℹ️ 射频半双工：密钥按优先级顺序单线程扫描")
+        lbl_mode.setStyleSheet("color: #94A3B8; font-size: 11px;")
+        opt_lay.addWidget(lbl_mode)
         layout.addWidget(opt_box)
 
         # 统计摘要栏
@@ -247,17 +225,5 @@ class KeySelectDialog(QDialog):
         return KeyManager.load_combined_keys(selected_files)
 
     def get_concurrency(self) -> int:
-        """获取选中的并发线程数"""
-        idx = self.combo_threads.currentIndex()
-        if idx == 0:
-            return 4
-        elif idx == 1:
-            return 8
-        elif idx == 2:
-            return 16
-        elif idx == 3:
-            return 32
-        elif idx == 4:
-            return 2
-        else:
-            return 1
+        """射频半双工下密钥扫描为单线程顺序执行。"""
+        return 1

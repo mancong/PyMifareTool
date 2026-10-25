@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 PyMifareTool - Dump 数据差分对比工具 (Diff Tool)
-参照 MifareOneTool 核心功能：对比两张卡或同一张卡消费前后的数据变动
+字节级差分比对器：对比两张卡或同一张卡消费前后的数据变动
 """
 
 import os
@@ -64,7 +64,7 @@ class DumpDiffWidget(QWidget):
         self.btn_compare.clicked.connect(self.compare_dumps)
 
         self.lbl_stats = QLabel("状态: 待载入数据")
-        self.lbl_stats.setStyleSheet("font-size: 13px; color: #38BDF8; font-weight: bold;")
+        self.lbl_stats.setStyleSheet("font-size: 10pt; color: #38BDF8; font-weight: bold;")
 
         stats_layout.addWidget(self.btn_compare)
         stats_layout.addWidget(self.lbl_stats)
@@ -112,7 +112,7 @@ class DumpDiffWidget(QWidget):
                 self.compare_dumps()
 
     def compare_dumps(self):
-        """对比全卡 1024 字节数据并输出差异列表"""
+        """对比全卡数据并输出差异列表 (支持 1K 与 4K 自适应对比)"""
         diff_count = 0
         diff_sectors = set()
         diff_blocks = set()
@@ -120,12 +120,17 @@ class DumpDiffWidget(QWidget):
         self.table.setRowCount(0)
         row = 0
 
-        for block_idx in range(64):
-            data_a = self.dump_a.get_block(block_idx)
-            data_b = self.dump_b.get_block(block_idx)
+        total_blocks = max(self.dump_a.block_count, self.dump_b.block_count)
+
+        for block_idx in range(total_blocks):
+            data_a = self.dump_a.get_block(block_idx) if block_idx < self.dump_a.block_count else bytes(16)
+            data_b = self.dump_b.get_block(block_idx) if block_idx < self.dump_b.block_count else bytes(16)
 
             if data_a != data_b:
-                sector_idx = block_idx // 4
+                if block_idx < self.dump_a.block_count:
+                    sector_idx = self.dump_a.get_block_sector(block_idx)
+                else:
+                    sector_idx = self.dump_b.get_block_sector(block_idx)
                 diff_sectors.add(sector_idx)
                 diff_blocks.add(block_idx)
 
@@ -160,8 +165,8 @@ class DumpDiffWidget(QWidget):
 
         if diff_count == 0:
             self.lbl_stats.setText("✅ 对比结果: 两张卡数据 100% 完全一致！")
-            self.lbl_stats.setStyleSheet("color: #10B981; font-weight: bold; font-size: 13px;")
+            self.lbl_stats.setStyleSheet("color: #10B981; font-weight: bold; font-size: 10pt;")
         else:
             sec_str = ", ".join(f"S{s:02d}" for s in sorted(diff_sectors))
             self.lbl_stats.setText(f"⚠️ 发现差异: 共 {diff_count} 处字节不同 | 受影响扇区: {sec_str} (共 {len(diff_blocks)} 个数据块)")
-            self.lbl_stats.setStyleSheet("color: #F87171; font-weight: bold; font-size: 13px;")
+            self.lbl_stats.setStyleSheet("color: #F87171; font-weight: bold; font-size: 10pt;")

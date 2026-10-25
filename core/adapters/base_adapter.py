@@ -6,7 +6,7 @@ PyMifareTool - 硬件读写器抽象适配器基类
 
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, Tuple, List
-import serial
+from core.transport.base import TransportLike
 
 
 class BaseReaderAdapter(ABC):
@@ -19,9 +19,15 @@ class BaseReaderAdapter(ABC):
         self.supported_baudrates: List[int] = [115200, 38400, 9600]
         self.firmware_info: str = "未知固件"
         self.last_detected_uid: Optional[bytes] = None
+        # 原始收发日志回调: callable(direction: str, text: str)；由 SerialWorker 注入桥接至 UI
+        self.log_cb = None
+
+    def get_firmware_version(self, ser: Optional[TransportLike] = None, timeout: float = 0.5) -> str:
+        """获取固件版本信息"""
+        return self.firmware_info
 
     @abstractmethod
-    def init_device(self, ser: serial.Serial) -> bool:
+    def init_device(self, ser: TransportLike) -> bool:
         """初始化设备与握手 (配置波特率、唤醒、SAM配置等)"""
         pass
 
@@ -34,31 +40,31 @@ class BaseReaderAdapter(ABC):
         pass
 
     @abstractmethod
-    def poll_card(self, ser: serial.Serial, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
+    def poll_card(self, ser: TransportLike, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
         """主动寻卡，检测卡片物理 UID 与射频参数"""
         pass
 
     @abstractmethod
-    def authenticate(self, ser: serial.Serial, block: int, key_type: str, key: bytes, uid: bytes = b"", timeout: float = 0.35) -> bool:
+    def authenticate(self, ser: TransportLike, block: int, key_type: str, key: bytes, uid: bytes = b"", timeout: float = 0.35) -> bool:
         """执行扇区密钥认证 (Key A / Key B)"""
         pass
 
     @abstractmethod
-    def read_block(self, ser: serial.Serial, block: int, timeout: float = 0.35) -> Optional[bytes]:
+    def read_block(self, ser: TransportLike, block: int, timeout: float = 0.35) -> Optional[bytes]:
         """读取指定物理块 (16 字节)"""
         pass
 
     @abstractmethod
-    def write_block(self, ser: serial.Serial, block: int, data: bytes, timeout: float = 0.35) -> bool:
+    def write_block(self, ser: TransportLike, block: int, data: bytes, timeout: float = 0.35) -> bool:
         """写入指定物理块 (16 字节)"""
         pass
 
-    def write_magic_block0(self, ser: serial.Serial, block0_data: bytes, magic_type: str = "CUID", timeout: float = 0.5) -> bool:
+    def write_magic_block0(self, ser: TransportLike, block0_data: bytes, magic_type: str = "CUID", timeout: float = 0.5) -> bool:
         """魔术卡/UID 卡后门写入 (支持 Gen1a 后门解锁与 Gen2/CUID/FUID/UFUID 直接写)"""
         if magic_type.upper() in ["CUID", "GEN2", "FUID"]:
             return self.write_block(ser, 0, block0_data, timeout=timeout)
         return False
 
-    def get_firmware_version(self, ser: serial.Serial, timeout: float = 0.5) -> Optional[str]:
-        """查询芯片与固件版本"""
-        return self.firmware_info
+    def lock_ufuid_card(self, ser: TransportLike, timeout: float = 0.5) -> bool:
+        """锁定 UFUID 卡片 (0 块锁死固化变为只读普通卡)"""
+        return False

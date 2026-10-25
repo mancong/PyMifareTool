@@ -6,9 +6,13 @@ PyMifareTool - 物理通信传输层 (Transport Layer)
 
 from .base import ITransport, TransportError
 from .serial_transport import SerialTransport
+from .ble_transport import BleTransport
+from .factory import TransportFactory
 
 __all__ = [
     "ITransport",
     "TransportError",
     "SerialTransport",
+    "BleTransport",
+    "TransportFactory",
 ]

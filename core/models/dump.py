@@ -63,6 +63,10 @@ class MifareDump:
         else:
             self.block_states = [BlockState.READ_OK] * self.block_count
 
+    def initialize_factory(self, keep_state_unread: bool = False):
+        """出厂化初始化全卡数据别名"""
+        self.reset_factory_default(keep_state_unread=keep_state_unread)
+
     def reset_to_unread(self):
         """将全卡数据重置为未载入/未读取状态 (UI 显示 '-')"""
         self.reset_factory_default(keep_state_unread=True)
@@ -113,6 +117,13 @@ class MifareDump:
         elif len(uid_bytes) == 7:
             self.data[0:7] = uid_bytes
             self.block_states[0] = BlockState.READ_OK
+
+    def get_uid(self) -> bytes:
+        """从 Block 0 提取卡片 UID (前 4 字节为标准 M1 UID)"""
+        block0 = self.get_block(0)
+        if len(block0) >= 4:
+            return bytes(block0[:4])
+        return b""
 
     def get_block(self, block_index: int) -> bytes:
         if 0 <= block_index < self.block_count:

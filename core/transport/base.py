@@ -6,12 +6,66 @@ PyMifareTool - 底层通信传输抽象层 (Transport Layer)
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any, Optional, Protocol, runtime_checkable
 
 
 class TransportError(Exception):
     """物理传输层基类异常"""
     pass
+
+
+class CallableInt(int):
+    """支持作为整数使用，也支持作为无参函数调用的特殊整数，以双向兼容 in_waiting 属性与方法"""
+    def __call__(self) -> int:
+        return int(self)
+
+
+class CallableBool:
+    """支持作为布尔值使用，也支持作为无参函数调用的特殊布尔对象，以双向兼容 is_open 属性与方法"""
+    def __init__(self, val: bool):
+        self._val = bool(val)
+
+    def __bool__(self) -> bool:
+        return self._val
+
+    def __call__(self) -> bool:
+        return self._val
+
+    def __eq__(self, other) -> bool:
+        return self._val == bool(other)
+
+    def __repr__(self) -> str:
+        return str(self._val)
+
+
+@runtime_checkable
+class TransportLike(Protocol):
+    """
+    适配器与业务层使用的最小传输通道契约 (pyserial / SerialTransport / BleTransport 均可满足)
+
+    is_open / in_waiting 使用 Any 类型，以兼容属性访问与方法调用两种历史写法。
+    """
+
+    baudrate: int
+    dtr: bool
+    rts: bool
+    is_open: Any
+    in_waiting: Any
+
+    def read(self, size: int = 1, timeout: Optional[float] = None) -> bytes:
+        ...
+
+    def write(self, data: bytes) -> int:
+        ...
+
+    def flush(self) -> None:
+        ...
+
+    def reset_input_buffer(self) -> None:
+        ...
+
+    def reset_output_buffer(self) -> None:
+        ...
 
 
 class ITransport(ABC):

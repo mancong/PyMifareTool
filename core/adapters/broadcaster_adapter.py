@@ -6,10 +6,11 @@ PyMifareTool - 简易单向 UID 广播发卡器驱动适配器 (Legacy Hardware)
 本适配器将报文解析解耦委托给 core.protocols.aabb
 """
 
-import serial
 from typing import Optional, Dict, Any, Tuple
 from .base_adapter import BaseReaderAdapter
+from core.transport.base import TransportLike
 from core.protocols.aabb import AABBProtocol, ReaderProtocol
+from core.models.card_converter import CardConverter
 
 
 class BroadcasterAdapter(BaseReaderAdapter):
@@ -23,7 +24,7 @@ class BroadcasterAdapter(BaseReaderAdapter):
         self.supported_baudrates = [38400, 9600, 115200]
         self.firmware_info = "单向广播发卡器固件 (自动上报 UID)"
 
-    def init_device(self, ser: serial.Serial) -> bool:
+    def init_device(self, ser: TransportLike) -> bool:
         """保持 DTR/RTS 释放，清空缓冲区"""
         try:
             # 🚨 硬件红线 1: 物理复位保护，释放 DTR/RTS
@@ -43,21 +44,24 @@ class BroadcasterAdapter(BaseReaderAdapter):
         frame_info, remaining = AABBProtocol.parse_frame(bytes(rx_buffer))
         if frame_info:
             frame_info["device_model"] = "Broadcaster"
+            uid_bytes = frame_info.get("uid_bytes")
+            if uid_bytes:
+                frame_info["conversions"] = CardConverter.convert_uid(uid_bytes)
             return frame_info, remaining
         return None, remaining
 
-    def poll_card(self, ser: serial.Serial, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
+    def poll_card(self, ser: TransportLike, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
         """单向硬件不支持下行寻卡指令，依靠被动监听流"""
         return None
 
-    def authenticate(self, ser: serial.Serial, block: int, key_type: str, key: bytes, uid: bytes = b"", timeout: float = 0.35) -> bool:
+    def authenticate(self, ser: TransportLike, block: int, key_type: str, key: bytes, uid: bytes = b"", timeout: float = 0.35) -> bool:
         """单向硬件不支持下行扇区认证"""
         return False
 
-    def read_block(self, ser: serial.Serial, block: int, timeout: float = 0.35) -> Optional[bytes]:
+    def read_block(self, ser: TransportLike, block: int, timeout: float = 0.35) -> Optional[bytes]:
         """单向硬件不支持下行读块"""
         return None
 
-    def write_block(self, ser: serial.Serial, block: int, data: bytes, timeout: float = 0.35) -> bool:
+    def write_block(self, ser: TransportLike, block: int, data: bytes, timeout: float = 0.35) -> bool:
         """单向硬件不支持下行写块"""
         return False

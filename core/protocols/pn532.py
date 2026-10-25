@@ -29,6 +29,7 @@ class PN532Protocol(BaseProtocolCodec):
     CMD_IN_LIST_PASSIVE_TARGET = 0x4A
     CMD_IN_DATA_EXCHANGE     = 0x40
     CMD_IN_COMMUNICATE_THRU  = 0x42
+    CMD_IN_RELEASE           = 0x52
     CMD_RF_CONFIGURATION     = 0x32
 
     # MIFARE Classic 内部指令

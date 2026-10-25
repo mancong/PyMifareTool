@@ -13,6 +13,7 @@ PyMifareTool - 核心协议与算法向后兼容门面 (Protocols & Models Facad
 from core.protocols.aabb import AABBProtocol, ReaderProtocol
 from core.protocols.pn532 import PN532Protocol
 from core.protocols.iso14443b import ISO14443BProtocol, calculate_crc_b, CIU_REGISTERS_TYPE_B_ID
+from core.protocols.iso7816 import APDUProtocol, SW_DESCRIPTIONS, AID_T_UNION, AID_PBOC_CASH
 from core.models.card_converter import CardConverter
 from core.models.access_bits import AccessBitsDecoder, AccessBitsEncoder
 
@@ -23,6 +24,10 @@ __all__ = [
     "ISO14443BProtocol",
     "calculate_crc_b",
     "CIU_REGISTERS_TYPE_B_ID",
+    "APDUProtocol",
+    "SW_DESCRIPTIONS",
+    "AID_T_UNION",
+    "AID_PBOC_CASH",
     "CardConverter",
     "AccessBitsDecoder",
     "AccessBitsEncoder",
