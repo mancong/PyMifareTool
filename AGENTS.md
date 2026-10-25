@@ -1,198 +1,591 @@
-# AGENTS.md - PyMifareTool AI 协同开发与维护指导手册
+# AGENTS.md
 
-> **致未来的 AI Agent / 开发者**：  
-> 本文件定义了在本项目（`PyMifareTool`）中进行代码阅读、维护、调试、扩展及自动化测试时的**核心技术上下文、架构铁律、硬件安全红线与开发工作流**。在对本项目进行任何修改或生成新代码前，请务必完整理解本手册规范。
-
----
-
-## 1. 项目基础元数据
-
-* **项目名称**：`PyMifareTool` (智能 Mifare Classic M1 卡全功能上位机套件)
-* **技术基座**：`Python 3.12+` / `PyQt6 6.8+` / `pyserial` / `sqlite3`
-* **对标标杆**：开源经典 [MifareOneTool](https://github.com/xcicode/MifareOneTool)
-* **运行平台**：Windows 10/11 (当前开发主环境，支持多平台扩展)
-* **硬件环境**：支持双硬件架构自适应探测：
-  1. **专业双向读写器**：`PCR532 / PN532`（NXP PN532 射频主控 + CH340E USB-UART，115200bps HSU 双向协议，全面支持 ISO14443 Type A 及二代身份证 Type B 读写/破解）；
-  2. **简易广播发卡器**：板载 13.56MHz 射频前端 + 新唐 8051 MCU + CH340E（38400bps，出厂固件单向广播 UID）。
+> **给 AI Agent 的第一读本**  
+> 本文件是 PyMifareTool 的项目级上下文与操作规范。开始修改代码前，请先阅读「快速开始」「架构」「硬件红线」三节。  
+> 若本文件与源码冲突，**以源码为准**；发现文档过期时，请顺手修正本文件。
 
 ---
 
-## 2. 核心架构与目录导航
+## 1. 项目速览
 
-整个工程严格遵循**软件工程整洁分层架构（Clean Layered Architecture）**，实现传输层、无状态协议层、领域模型层、硬件驱动适配器层与业务服务层的全面解耦：
+| 项 | 内容 |
+|---|---|
+| 项目名 | `PyMifareTool` |
+| 定位 | Mifare Classic 1K/4K、二代身份证（ISO14443-B）、ISO14443-4 CPU 智能卡综合上位机 |
+| 语言/框架 | Python 3.12+、PyQt6 6.6+ |
+| 通信 | pyserial（USB 串口）、bleak（BLE） |
+| 存储 | SQLite3（`cards.db`，WAL 模式） |
+| 入口 | `main.py` |
+| 测试 | `python tests/run_tests.py` |
+| 平台 | Windows 10/11 为主，代码结构支持跨平台 |
+
+### 支持的硬件
+
+1. **PCR532 / PN532 双向读写器**  
+   - 115200bps，NXP PN532 HSU 协议；
+   - 支持 M1 寻卡、认证、读写、魔术卡、二代身份证 Type B、CPU 卡 APDU。
+
+2. **简易广播发卡器**  
+   - 38400bps，单向广播 UID；
+   - **物理上不响应任何下行指令**，只能被动接收其 AABB 上行帧。
+
+3. **BLE 无线读写器**  
+   - Minicopy / WCH CH59x；
+   - 通过 GATT 透明传输 PN532 HSU 帧；
+   - 典型服务：WCH `0xFF00`（通知 `FF01`、写 `FF02`）；Minicopy `AE00`（通知 `AE02`、写 `AE01`）。
+
+---
+
+## 2. 快速开始
+
+```bash
+# 安装依赖
+python -m pip install -r requirements.txt
+
+# 启动应用
+python main.py
+
+# 运行全量测试（当前基线：96 项通过，约 3 秒）
+python tests/run_tests.py
+```
+
+无头环境测试会自动使用 `QT_QPA_PLATFORM=offscreen`。
+
+**不要**在未确认硬件连接的情况下运行 `tools/` 下的串口脚本；它们多数直接硬编码 COM 口。
+
+---
+
+## 3. 目录地图
 
 ```text
 PyMifareTool/
-├── core/                        # [核心引擎层]
-│   ├── protocols/               # ── 无状态协议编解码层 (纯数据、无 I/O 依赖)
-│   │   ├── base.py              # BaseProtocolCodec 协议抽象基类与异常
-│   │   ├── aabb.py              # AA BB 简易读卡器协议帧解包/构建与 BCC 校验
-│   │   ├── pn532.py             # NXP PN532 HSU 标准通信帧打包/解包/ACK校验
-│   │   └── iso14443b.py         # 二代身份证 ISO14443-B CRC-B 计算与非标 APDU
-│   ├── models/                  # ── 领域实体与模型层
-│   │   ├── dump.py              # MifareDump 1K/4K 内存数据实体、三态生命周期、序列化器
-│   │   ├── access_bits.py       # AccessBitsDecoder & Encoder 尾块控制字位运算算法
-│   │   └── card_converter.py    # CardConverter (UID 正逆序/8H10D/WG26/34/二代证等换算)
-│   ├── transport/               # ── 底层物理传输层
-│   │   ├── base.py              # ITransport 通信链路抽象基类
-│   │   └── serial_transport.py  # 物理串口安全传输 (严格保障 DTR/RTS=False 与互斥锁)
-│   ├── adapters/                # ── 硬件驱动适配器层
-│   │   ├── base_adapter.py      # BaseReaderAdapter 统一驱动抽象接口
-│   │   ├── pn532_adapter.py     # PCR532 / PN532 双向读写器适配器 (委托至 protocols)
-│   │   ├── broadcaster_adapter.py # 简易单向广播发卡器驱动适配器 (委托至 protocols)
-│   │   ├── factory.py           # ReaderAdapterFactory 驱动工厂与动态注册中心
-│   │   └── extensions/          # ── 【未来硬件与仿真扩展插槽】
-│   │       ├── pcsc_adapter.py  # PC/SC (ACR122U / CCID) 免驱智能卡读卡器接入插槽
-│   │       └── virtual_adapter.py # 内存虚拟卡离线仿真适配器 (支持纯软件免硬件测试)
-│   ├── services/                # ── 应用业务服务层
-│   │   ├── card_worker.py       # CardOperationWorker (三阶段并发字典破解/读写/缓存加速)
-│   │   ├── key_manager.py       # KeyManager (MCT 密码字典生态解析/去重/合并分发)
-│   │   ├── serial_worker.py     # SerialWorker (PyQt6 QThread 异步串口轮询与独占控制)
-│   │   └── attack_runner.py     # AttackRunner & BaseAttackEngine (外部工具链抽象引擎)
-│   ├── card_db.py               # SQLite3 本地卡片档案库与刷卡流水存储引擎 (双模清空)
-│   ├── protocol.py              # 【门面导出】向下兼容 re-export 所有协议类与模型
-│   ├── dump_model.py            # 【门面导出】向下兼容 re-export MifareDump / BlockState
-│   ├── key_manager.py           # 【门面导出】向下兼容 re-export KeyManager
-│   ├── serial_worker.py         # 【门面导出】向下兼容 re-export SerialWorker
-│   └── card_service.py          # 【门面导出】向下兼容 re-export CardOperationWorker
-├── ui/                          # [表现层] 现代暗黑科技风 PyQt6 组件
-│   ├── main_window.py           # 主窗口仪表盘、连接管理、Hero UID 呈现、二代证专属读取
-│   ├── sector_table.py          # 16/40 扇区三态彩色矩阵、就地编辑、字典并发配置弹窗联动
-│   ├── card_manage.py           # 发卡档案管理、持卡人编辑、流水审计与双模清空
-│   ├── dump_diff.py             # 双卡 Dump 字节级差分比对工具 (Diff Tool)
-│   ├── dictionary_tools.py      # MCT 密码字典管理中枢、Access Bits 解析/编码、卡号换算
-│   └── key_select_dialog.py     # 字典动态勾选、合并统计与多线程并发配置模态框
-├── keys/                        # [MCT 标准字典库]
-│   ├── std.keys                 # MCT 经典 3 项标准高频密码
-│   ├── hotel-std.keys           # 经典主流酒店门锁卡默认密码
-│   └── extended-std.keys        # 1418 项全网海量去重去损扩展字典
-├── tests/                       # [质量工程]
-│   └── run_tests.py             # 45 项全自动集成测试套件 (协议/解耦/模型/数据库/适配器/并发/二代证/GUI无头)
-├── docs/                        # [系统文档]
-│   ├── change/README.md         # 架构修复、P0/P1/P2重构、PCR532、MCT并发字典与架构解耦演进录
-│   ├── PROTOCOL_SPECIFICATION.md# 硬件串口通信协议与算法技术规范书
-│   └── README.md                # 文档索引
-├── cards.db                     # 本地 SQLite 运行时数据库
-├── main.py                      # 桌面端主程序启动入口
-├── requirements.txt             # 依赖声明文件
-└── README.md                    # 项目用户说明书
+├── main.py                     # 应用入口
+├── requirements.txt
+├── cards.db                    # 运行时 SQLite（卡片档案/流水/扇区密钥）
+│
+├── core/
+│   ├── protocols/              # 无状态协议编解码（禁止持有 I/O）
+│   │   ├── base.py             # BaseProtocolCodec / 协议异常
+│   │   ├── aabb.py             # AA BB 广播器协议
+│   │   ├── pn532.py            # PN532 HSU 帧
+│   │   ├── iso14443b.py        # 二代证 CRC-B / REQB / ATTRIB / GUID
+│   │   └── iso7816.py          # APDU、TLV、PBOC/交通联合解析
+│   ├── models/                 # 领域模型
+│   │   ├── dump.py             # MifareDump、BlockState、MCT/EML/JSON/TXT
+│   │   ├── access_bits.py      # Access Bits 编解码
+│   │   └── card_converter.py   # UID 正逆序 / 8H10D / WG26/34
+│   ├── transport/              # 物理传输
+│   │   ├── base.py             # ITransport + 鸭子类型兼容包装
+│   │   ├── serial_transport.py # 串口，强制 DTR/RTS=False
+│   │   ├── ble_transport.py    # BLE，后台 asyncio + MTU 分片
+│   │   ├── ble_classifier.py   # BLE 设备分类
+│   │   └── factory.py          # TransportFactory
+│   ├── adapters/               # 硬件适配
+│   │   ├── base_adapter.py     # 统一读卡接口
+│   │   ├── pn532_adapter.py    # PCR532/PN532（核心，职责较多）
+│   │   ├── broadcaster_adapter.py
+│   │   ├── libnfc_adapter.py   # 外部 nfc-* 命令行工具
+│   │   ├── factory.py          # ReaderAdapterFactory / probe_device
+│   │   └── extensions/
+│   │       ├── pcsc_adapter.py # 目前是空壳
+│   │       └── virtual_adapter.py
+│   ├── services/
+│   │   ├── serial_worker.py    # QThread 串口/BLE 轮询与独占
+│   │   ├── card_worker.py      # 读卡/破解/写卡/固件探测
+│   │   ├── key_manager.py      # 字典扫描、解析、合并
+│   │   └── attack_runner.py    # mfoc/mfcuk/hardnested/mfdetect
+│   ├── card_db.py              # SQLite 访问
+│   ├── protocol.py             # 兼容门面
+│   ├── dump_model.py           # 兼容门面
+│   ├── key_manager.py          # 兼容门面
+│   ├── serial_worker.py        # 兼容门面
+│   ├── card_service.py         # 兼容门面
+│   └── attack_runner.py        # 兼容门面
+│
+├── ui/
+│   ├── main_window.py          # 主窗口、连接、Hero UID、日志、M1/CPU 切换
+│   ├── sector_table.py         # 扇区矩阵、读写/破解/工具入口
+│   ├── sector_widgets.py       # 统计头、雷达、块检查器、值块
+│   ├── dictionary_tools.py     # Access Bits、卡号换算、字典、终端、外部攻击
+│   ├── cpu_card_widget.py      # CPU 卡概览/流水/文件树/APDU 控制台
+│   ├── magic_card_dialog.py    # UID 写号、工厂清卡、UFUID 锁死
+│   ├── clone_wizard_dialog.py  # 克隆向导
+│   ├── crack_dialogs.py        # 扇区范围、手动密钥
+│   ├── card_manage.py          # 卡片档案、流水审计
+│   ├── key_select_dialog.py    # 字典勾选
+│   └── dump_diff.py            # Dump 差分
+│
+├── keys/                       # 标准/酒店/扩展/共享字典，约 7.4 万条
+├── tests/run_tests.py          # 16 个测试类，96 项测试
+└── tools/                      # 开发期串口/协议调试脚本，不参与运行时
 ```
 
 ---
 
-## 3. 🚨 硬件交互三大红线 (CRITICAL HARDWARE RULES)
+## 4. 架构与依赖方向
 
-当编写或修改与串口通信相关的代码时，**绝对不可触碰以下物理与逻辑红线**：
+```text
+ui  →  services  →  adapters  →  transport
+                         ↘
+                       protocols  ←  models
+```
 
-### 🔴 红线 1：强制保持 DTR / RTS 为 False (物理复位保护)
+**必须保持的依赖规则：**
+
+- `core/protocols/` 只做字节编解码，**不得**持有串口、BLE、UI 或数据库对象。
+- `core/models/` 只做数据与算法，**不得**发起 I/O。
+- 所有物理读写必须经过 `transport/` 与 `adapters/`。
+- UI 不得直接调用 `serial.Serial`、`bleak` 或 `pyserial`。
+- 耗时操作必须放到 `QThread`（`SerialWorker` / `CardOperationWorker` / 各类 Worker）。
+- 兼容门面（`core/protocol.py` 等）仅用于旧导入路径，不要在新代码中扩散。
+
+---
+
+## 5. 硬件红线（最高优先级）
+
+### 红线 1：DTR / RTS 必须保持 False
+
+任何打开串口的地方都必须：
+
 ```python
-# 必须在任何打开 serial.Serial 的地方严格声明：
 ser.dtr = False
 ser.rts = False
 ```
-* **物理根因**：CH340E / CP2102 芯片的 DTR/RTS 引脚在硬件 PCB 上直接与主控芯片的复位端（RESET/BOOT）连通。上位机若拉高 DTR/RTS 会将单片机（8051 或 PCR532 射频控制器）锁死在物理复位状态，导致工作指示灯熄灭、系统“假死”。
 
-### 🔴 红线 2：硬件双模态特性隔离与射频独占互斥 (PCR532 双向 vs 简易广播器)
-* **硬件特性严格隔离 (`is_bidirectional`)**：
-  * **简易发卡器（Broadcaster）**：出厂固件单向广播 UID（38400bps），未开启串口接收中断，**物理上不会响应任何上位机下行指令**。切勿对其发送任何读写、认证或寄存器配置指令；
-  * **PCR532 / PN532 全功能读写器**：基于 115200bps HSU 双向协议，完整支持 Type A (M1/UID/CUID) 寻卡、认证、读写以及二代身份证 (ISO14443-B) 8 字节 GUID 穿透读取。
-* **射频半双工与串口通信独占互斥 (`set_exclusive` & `_hardware_lock`)**：
-  * 13.56MHz 高频电磁场属于单载波半双工环境，且串口物理总线同一瞬间只能交互一帧数据。
-  * 在执行任何长耗时底层操作（全卡读取、扇区写入、并发字典破解、二代身份证专用时序读取）时，**必须调用 `serial_worker.set_exclusive(True)` 暂停后台自动轮询**；
-  * 所有的底层数据收发必须受 `self._hardware_lock` 线程锁保护，**绝对禁止工作线程与后台轮询线程并发向物理串口抛掷指令**，否则会导致 UART 粘包错乱或卡片 Mifare 密码认证状态瞬时丢失。
+CH340E/CP2102 的 DTR/RTS 可能直连主控复位端，拉高会导致设备假死。
 
-### 🔴 红线 3：Block 0 厂商/UID 块写保护 (防止卡片报废)
-* Mifare Classic 1K/4K 的 Block 0（0 扇区 0 块）存放原厂物理 UID、BCC 校验及厂商硬件配置数据。
-* 普通原厂 IC 卡（S50/S70）的 Block 0 在物理制造时已熔丝固化，尝试写入会导致写错误甚至卡片永久变砖锁死；仅 CUID（后门指令直接写）或 Gen1a（特殊唤醒后门盲写）魔术卡支持改写 Block 0。
-* 任何涉及写卡、Dump 还原的业务逻辑，必须默认开启 `allow_block0_write = False`，除非用户在 UI 上显式取消勾选写保护并确认风险。
+### 红线 2：广播器只能收，不能发
 
----
+- 广播器（Broadcaster）是 **38400bps 单向 UID 广播**；
+- 正常业务链路不得向其发送认证、读写、寄存器配置等下行帧；
+- `BroadcasterAdapter` 的认证/读写为空实现，这是刻意设计；
+- 例外：`CardOperationWorker._do_probe_firmware()` 的广播器分支目前会主动发送探测帧，这是已知违规点，修复前不要扩大该行为。
 
-## 4. 关键协议与数据结构规范
+### 红线 3：射频/串口必须独占
 
-### 1. 通用 AA BB 协议帧封装 (简易广播器)
-```text
-[AA BB] [LEN] [CMD] [DATA (0~N 字节)] [BCC]
-```
-* $\text{LEN} = \text{len(DATA)} + 2$
-* $\text{BCC} = \text{LEN} \oplus \text{CMD} \oplus \text{DATA}[0] \oplus \cdots \oplus \text{DATA}[N-1]$
-* 自动上报进卡帧：`AA BB 06 01 [4字节UID] [BCC]`
+- 长操作前必须 `serial_worker.set_exclusive(True)`，结束后恢复；
+- 底层收发必须受 `_tx_lock` / `_hardware_lock` 保护；
+- 禁止工作线程与自动轮询线程同时向同一串口写数据；
+- 不要试图用多线程并发认证同一张卡，13.56MHz 是半双工环境。
 
-### 2. NXP PN532 HSU 标准通信帧协议 (PCR532)
-```text
-[00 00 FF] [LEN] [LCS] [TFI] [DATA...] [DCS] [00]
-```
-* **前导码与起始符**：`00 00 FF`
-* **长度与长度校验**：$\text{LEN} = \text{len(DATA)} + 1$ (包含 TFI)，$\text{LCS} = (-\text{LEN}) \ \& \ \text{0xFF}$（满足 $(\text{LEN} + \text{LCS}) \ \& \ \text{0xFF} == 0$）
-* **帧标识符 TFI**：主机发往下位机为 `D4`，芯片应答为主机为 `D5`
-* **数据校验 DCS**：$\text{DCS} = (-(TFI + \sum DATA)) \ \& \ \text{0xFF}$
-* **ACK 握手确认帧**：`00 00 FF 00 FF 00`
+### 红线 4：Block 0 默认禁止写
 
-### 3. 二代身份证 (ISO/IEC 14443-B) 穿透握手时序 (PCR532)
-二代居民身份证内置中国公安部定制的 ISO/IEC 14443-B 安全芯片（内部含国密算法，不可越权读取内部加密区，但物理 GUID 序列号开放可读）：
-1. **CIU 射频寄存器配置**：写入 12 组 CIU 内部寄存器（包括解调器门限、副载波调制增益、接收通道滤波）；
-2. **REQB 广播寻卡**：发送 `05 00 00`，解析带 CRC-B 的 ATQB 响应，提取 4 字节 PUPI；
-3. **ATTRIB 激活物理信道**：发送 `1D [PUPI 4B] 00 08 01 08`，建立 Type B 射频传输通道；
-4. **读取 8 字节 GUID 序列号**：通过 APDU `00 36 00 00 08` 穿透读取芯片全球唯一 8 字节物理硬件码。
+- Mifare Classic 的 Block 0 保存 UID/BCC/厂商数据；
+- 普通卡写 Block 0 可能永久损坏；
+- 默认 `allow_block0_write=False`；
+- 只有用户显式取消写保护，且卡为 CUID/GEN1A/UFUID 等魔术卡时，才允许走 `write_magic_block0()`。
 
-### 4. 卡号标准换算规则
-给定 4 字节（Type A M1卡）或 8 字节（二代身份证）大端序 UID：
-* **正序十六进制**：`D7 7E A0 DF`（4字节）或 `08 61 24 5A 7B 8C 9D 0E`（8字节）
-* **倒序十六进制**：`DF A0 7E D7`
-* **8H10D (倒序十进制)**：将逆序字节转大端整数 `int.from_bytes(uid[::-1], 'big')` 并前补零至 10 位（示例：`3751837399`）。
-* **韦根 WG26**：`f"{uid_rev[1]:03d},{int.from_bytes(uid_rev[2:4], 'big'):05d}"`（示例：`160,32471`）。
+### 红线 5：CPU 卡 T=CL 状态机
 
-### 5. Access Bits 控制字结构
-扇区尾块字节 6~8 存放 $C_1, C_2, C_3$ 控制位（带反码取反校验）：
-* 出厂默认空卡控制字：`FF 07 80 69`
-* 只读保护控制字：`08 77 8F 69`
-* 任何修改必须通过 `AccessBitsDecoder` 校验合法性后再写入 `MifareDump`。
+- Mifare 认证后，双界面 CPU 卡可能停留在 CRYPTO1 状态；
+- 下发 APDU 前必须重新 `InListPassiveTarget` 激活到 ISO14443-4；
+- Type B 身份证读取会改写 12 组 CIU 寄存器，**必须在 `finally` 中恢复 Type A 默认寄存器**；
+- `61xx` 必须 GET RESPONSE，`6Cxx` 必须修正 Le；批量 APDU 必须支持中断与移卡退出。
 
 ---
 
-## 5. 日常开发与维护工作流
+## 6. 协议速查
 
-### 1. 运行应用程序
-```bash
-python main.py
+### 6.1 AA BB（广播器）
+
+```text
+AA BB LEN CMD DATA... BCC
+LEN = len(DATA) + 2          # 含 CMD 与 BCC
+BCC = LEN XOR CMD XOR DATA...
 ```
 
-### 2. 运行自动化集成测试 (质量准入标准)
-在提交任何代码修改后，**必须在终端执行全量自动化测试套件**：
+自动 UID 上报示例：`AA BB 06 01 [4B UID] [BCC]`。
+
+### 6.2 PN532 HSU
+
+```text
+00 00 FF LEN LCS TFI CMD DATA... DCS 00
+payload = TFI + CMD + DATA
+LEN = len(payload) = 2 + len(DATA)
+LCS = (-LEN) & 0xFF
+DCS = (-sum(payload)) & 0xFF
+```
+
+- ACK：`00 00 FF 00 FF 00`
+- 主机 TFI：`D4`；PN532 应答 TFI：`D5`
+- 常见命令：`0x02` 固件、`0x4A` 寻卡、`0x40` InDataExchange、`0x42` InCommunicateThru、`0x08` 写寄存器
+
+### 6.3 ISO14443-B 身份证
+
+1. 写 Type B CIU 寄存器；
+2. `REQB`（`05 00 00` + CRC-B）；
+3. 解析 ATQB，取 4 字节 PUPI；
+4. `ATTRIB`（`1D + PUPI + 00 08 01 08` + CRC-B）；
+5. APDU `00 36 00 00 08` 读取 8 字节 GUID；
+6. 恢复 Type A 寄存器。
+
+### 6.4 CPU 卡 APDU
+
+| 用途 | APDU |
+|---|---|
+| SELECT AID | `00 A4 04 00 Lc AID` |
+| SELECT FID | `00 A4 00 00 02 FID` |
+| READ BINARY | `00 B0 P1 P2 Le` |
+| READ RECORD | `00 B2 Rec P2 00` |
+| 余额 | `80 5C 00 02 04` |
+| GET CHALLENGE | `00 84 00 00 Le` |
+| GET RESPONSE | `00 C0 00 00 Le` |
+
+### 6.5 UID 换算
+
+给定 4 字节 UID：
+
+- 正序/倒序十六进制；
+- 8H10D：`int.from_bytes(uid[::-1], "big")`，补零到 10 位；
+- WG26：`uid_rev[1]` + `uid_rev[2:4]`；
+- WG34：`uid_rev[0:2]` + `uid_rev[2:4]`。
+
+### 6.6 Access Bits
+
+- 默认尾块：`FF 07 80 69`
+- 只读：`08 77 8F 69`
+- 修改必须经 `AccessBitsDecoder` 校验，不要手写未验证的控制字。
+
+---
+
+## 7. 核心 API 备忘
+
+### `SerialWorker`
+
+```python
+SerialWorker(port="COM3", baudrate=115200, device_type="auto")
+set_connection(port, baudrate, device_type)
+set_ble_connection(address, device_type)
+set_exclusive(True/False)
+set_auto_poll(bool)
+set_poll_interval(ms)
+poll_card_once() -> dict | None
+authenticate(block, key_type, key, uid) -> bool
+read_block(block) -> bytes | None
+write_block(block, data) -> bool
+write_magic_block0(block, data, magic_type) -> bool
+reactivate_target() -> bool
+send_apdu_once(apdu) -> dict
+read_cpu_card_once() -> dict
+scan_cpu_card_tree_once(...) -> dict
+```
+
+关键信号：`sig_connected`、`sig_disconnected`、`sig_card_swiped`、`sig_card_removed`、`sig_raw_log`、`sig_device_identified`。
+
+### `CardOperationWorker`
+
+操作常量：
+
+```python
+OP_CRACK_KEYS  = "crack_keys"
+OP_READ_CARD   = "read_card"
+OP_READ_SECTOR = "read_sector"
+OP_WRITE_CARD  = "write_card"
+OP_PROBE_FIRMWARE = "probe_firmware"
+```
+
+信号：`sig_progress`、`sig_log`、`sig_sector_cracked`、`sig_block_read`、`sig_block_failed`、`sig_finished`。
+
+### `MifareDump`
+
+常用方法：
+
+```python
+get_uid() / set_uid()
+get_block(n) / set_block(n, data)
+get_sector_info(sector)
+get_sector_first_block(sector)
+get_sector_trailer_block(sector)
+verify_dump() / repair_dump()
+save_mct() / load_mct()
+save_eml() / load_eml()
+save_json() / load_json()
+save_to_file() / load_from_file()
+```
+
+注意：**没有** `get_key_a()`、`get_key_b()`、`export_to_mct_file()`。取密钥请用 `get_sector_info()`。
+
+### `CardDatabase`
+
+常用方法：
+
+```python
+record_swipe(uid, conv_info, raw_hex)
+update_card_info(uid, name, holder, note)
+get_card(uid)
+list_all_cards()
+list_recent_logs(limit=100)
+save_sector_keys(uid, sector, key_a, key_b)
+get_card_keys(uid)
+clear_swipe_logs()
+close()
+```
+
+注意：**没有** `upsert_card()`；表结构也没有 `department/phone/remark`。
+
+### `KeyManager`
+
+```python
+get_keys_dir()
+list_available_files()
+parse_key_file(path)
+load_combined_keys(selected_files=None, include_defaults_fallback=True)
+```
+
+注意：**没有** `save_custom_keys()`。
+
+### `ReaderAdapterFactory`
+
+```python
+ReaderAdapterFactory.create_adapter(device_type, ...)
+ReaderAdapterFactory.probe_device(ser, preferred="auto")
+ReaderAdapterFactory.register_adapter(name, cls)
+```
+
+UI 可选设备：`auto / pn532 / broadcaster / virtual`。
+
+---
+
+## 8. 主要数据流
+
+### 8.1 连接
+
+```text
+UI → SerialWorker.set_connection()
+   → run() 打开 SerialTransport / BleTransport
+   → ReaderAdapterFactory.probe_device()
+   → adapter.init_device()
+   → sig_connected / sig_device_identified
+   → 自动轮询 poll_card()
+```
+
+### 8.2 Mifare 读卡
+
+```text
+CardOperationWorker(read_card)
+→ set_exclusive(True)
+→ 寻卡
+→ 逐扇区尝试 KeyA/KeyB（DB 密钥优先，其后字典）
+→ 认证成功则读取该扇区全部块
+→ 写入 MifareDump，更新 READ_OK / READ_FAILED
+→ 发信号刷新 UI
+```
+
+### 8.3 字典破解
+
+三阶段：
+
+1. 高频优先密钥快速扫描；
+2. 已破解密钥跨扇区传播；
+3. 剩余扇区全字典深度扫描。
+
+UI 收到 `sig_sector_cracked` 后立即把密钥写入数据库。
+
+### 8.4 写卡
+
+- 逐扇区认证（Dump KeyA → KeyB → 自定义字典）；
+- Block 0 默认跳过；
+- 魔术卡写 Block 0 必须显式允许；
+- 统计成功/失败/跳过块数。
+
+### 8.5 CPU 卡
+
+```text
+恢复 Type A 寄存器
+→ 重新激活 T=CL
+→ SELECT PPSE
+→ 选择交通联合 / PBOC 应用
+→ READ BINARY 0x15
+→ GET BALANCE
+→ READ RECORD 0x18 / 0x0B
+→ 解析余额/卡号/交易流水
+```
+
+### 8.6 BLE
+
+```text
+扫描 → BleClassifier 分类 → 选择读卡器
+→ BleTransport 连接
+→ 自动发现 notify/write 特征
+→ 订阅通知
+→ 按 MTU 分片发送 HSU 帧
+```
+
+---
+
+## 9. UI 结构
+
+主窗口：
+
+- 左侧：连接方式（USB/BLE）、设备类型、串口/波特率、BLE 扫描、连接、读身份证、自动轮询、Hero UID、卡号换算、注册卡片、日志；
+- 右侧：Dump 差分、卡片管理、字典工具、扇区矩阵、CPU 卡页；
+- 扇区/CPU 页通过右上角自定义 TabBar 切换；
+- 扇区表默认显示，CPU 卡页隐藏在主 Tab 中。
+
+修改 UI 时遵循现有暗黑科技风样式：
+
+- 背景 `#0F172A`
+- 容器 `#1E293B`
+- 高亮 `#38BDF8`
+
+---
+
+## 10. 测试与质量
+
 ```bash
 python tests/run_tests.py
 ```
-* **通过标准**：45 项测试全部通过（`OK`, 0 failures, 0 errors, 1 skipped 物理串口）。
-* 测试套件支持在无图形界面的 CI/无头环境（`offscreen`）下全自动仿真运行。
 
-### 3. 代码编写风格约束
-* **字符编码**：所有源码与文本文件必须严格保存为 **UTF-8 (without BOM)**，严禁混入 GBK 字符。
-* **异步并发**：耗时任务（串口读写、网络、算法暴力破解）绝对禁止在 PyQt6 主 GUI 线程中同步执行，必须使用 `QThread`（如 `SerialWorker`、`CardOperationWorker`）并通过 Qt 信号槽与 UI 交互。
-* **分层纯粹性**：协议编解码（`core/protocols/`）必须保持纯函数/无状态，严禁在协议类内持有串口或网络套接字句柄；物理 I/O 统一归入 `core/transport/` 与 `core/adapters/`。
-* **类型标注**：优先使用 `typing.Dict`, `typing.List`, `typing.Optional`, `typing.Tuple` 进行类型提示。
+当前基线：
+
+- **96 项测试全部通过**
+- 约 **3 秒**
+- 覆盖协议、Dump、数据库、GUI 无头渲染、PN532、字典、二代证、BLE、CPU 卡、4K、魔术卡/克隆/攻击器。
+
+但请注意测试盲区：
+
+- 克隆向导只测界面和步骤，不执行真实读写；
+- 魔术卡工厂清卡未执行；
+- 字典导入/保存未执行；
+- 固件探测测试 mock 了 `get_firmware_version`；
+- 移卡中止测试 mock 了 `is_card_present`。
+
+因此，**测试全绿不代表所有 GUI/硬件路径可用**。修改相关模块后，必须补充真实路径测试。
 
 ---
 
-## 6. 典型扩展任务与插件化指引 (For Future Agents)
+## 11. 编码与修改规范
 
-### 任务场景 A：接入新的免驱 USB 读写器 (如 ACR122U / PC-SC 驱动)
-1. 继承 [core/adapters/extensions/pcsc_adapter.py](file:///d:/Workspace/Works/Other/PyMifareTool/core/adapters/extensions/pcsc_adapter.py) 中的 `PCSCReaderAdapter`；
-2. 接入 `pyscard`，在 `poll_card()` 中发送 APDU `FF CA 00 00 00` 获取 UID，在 `authenticate()` 中发送 APDU `FF 86...`；
-3. 调用 `ReaderAdapterFactory.register_adapter("pcsc", PCSCReaderAdapter)` 注册至工厂；
-4. 在 [tests/run_tests.py](file:///d:/Workspace/Works/Other/PyMifareTool/tests/run_tests.py) 中追加对应单元测试。
+- 所有源码/文本使用 **UTF-8 without BOM**，禁止 GBK。
+- 保持现有中文注释风格；只写必要注释，不写无意义注释。
+- 类型标注优先使用 `typing.Dict/List/Optional/Tuple`。
+- 禁止在 UI 主线程执行串口、BLE、破解、文件大树解析。
+- 禁止在协议类中持有 I/O 句柄。
+- 禁止绕过 `SerialWorker` 直接打开串口，除非是 `tools/` 下的调试脚本。
+- 修改硬件相关代码前，先确认 `set_exclusive` / `_hardware_lock` / DTR/RTS / Block 0 保护未被破坏。
+- 不要随意改动 `keys/` 与 `cards.db`；测试如需数据库请使用临时路径。
+- **不要提交代码，除非用户明确要求。**
+- 修改后至少运行 `python tests/run_tests.py`；涉及 GUI 的改动需在 offscreen 下验证。
 
-### 任务场景 B：免硬件离线虚拟卡仿真测试
-1. 使用 [core/adapters/extensions/virtual_adapter.py](file:///d:/Workspace/Works/Other/PyMifareTool/core/adapters/extensions/virtual_adapter.py) 的 `VirtualDumpReaderAdapter`；
-2. 调用 `adapter.set_virtual_dump(dump)` 挂载内存中的 Mifare 卡；
-3. 上层业务可完全脱离物理 USB/串口硬件，对虚拟卡进行贴卡感知、密码验证与读写。
+---
 
-### 任务场景 C：挂载外部安全算法引擎 (Hardnested / Darkside)
-1. 继承 [core/services/attack_runner.py](file:///d:/Workspace/Works/Other/PyMifareTool/core/services/attack_runner.py) 中的 `BaseAttackEngine`；
-2. 实现 `is_available()`、`start_attack()` 与 `cancel()` 接口规范；
-3. 可包装外部开源工具（如 Proxmark3 / RFIDtools 的 `crapto1_bs.exe`）或直接编写纯 Python 破解算法。
+## 12. 扩展指南
 
-### 任务场景 D：向 UI 添加新的实用工具 Tab
-1. 在 `ui/` 目录下创建新组件（继承自 `QWidget`）；
-2. 在 `ui/main_window.py` 的 `_init_ui()` 中将该组件添加到 `self.tabs`；
-3. 遵循现有的暗黑科技风 QSS 样式表规范（`#0F172A` 背景，`#38BDF8` 高亮，`#1E293B` 容器卡片）；
-4. 在 `tests/run_tests.py` 中添加无头仿真测试确保组件渲染不抛出未捕获异常。
+### 新增读卡器适配器
+
+1. 继承 `core/adapters/base_adapter.py` 的 `BaseReaderAdapter`；
+2. 实现 `init_device`、`parse_incoming`、`poll_card`、`authenticate`、`read_block`、`write_block`；
+3. 在 `ReaderAdapterFactory` 注册；
+4. 若要在 UI 暴露，加入 `DEVICE_CHOICES`；
+5. 在 `tests/run_tests.py` 增加单元测试与无头 UI 测试。
+
+### 新增传输通道
+
+1. 实现 `core/transport/base.py` 的 `ITransport`；
+2. 在 `TransportFactory.register_transport()` 注册；
+3. 保持 `is_open` / `in_waiting` 的兼容包装；
+4. 不要破坏串口 DTR/RTS 与锁语义。
+
+### 新增外部攻击引擎
+
+1. 继承 `core/services/attack_runner.py` 的 `BaseAttackEngine`；
+2. 实现 `is_available()`、`start_attack()`、`cancel()`；
+3. 用 `QProcess` 启动外部工具，解析进度与密钥；
+4. 在 UI 的外部攻击页注册。
+
+### 新增 UI 工具页
+
+1. 在 `ui/` 新建 `QWidget`；
+2. 在 `MainWindow._init_ui()` 加入 `self.tabs`；
+3. 使用现有 QSS 色板；
+4. 增加 offscreen 渲染测试；
+5. 耗时逻辑放入 Worker，不要阻塞主线程。
+
+### 待补全的扩展点
+
+- PCSC/ACR122U：补全 `PCSCReaderAdapter`；
+- libnfc：把 `LibnfcCliAdapter` 加入 UI；
+- TCP/Modbus：实现 `ITransport`；
+- 虚拟卡：补权限位与认证状态；
+- 克隆向导：修复现有接口不一致并支持 4K；
+- 魔术卡：修正密钥读取方式并完善工厂清卡；
+- 字典：增加缓存与增量统计。
+
+---
+
+## 13. 数据库与文件格式
+
+### `cards.db`
+
+```sql
+cards(uid PK, card_name, card_holder, card_type,
+      dec_10d, wiegand_26, wiegand_34, note,
+      created_at, last_swiped_at, swipe_count)
+
+swipe_logs(id PK, uid, swiped_at, raw_hex)
+
+card_keys(uid, sector, key_a, key_b, updated_at,
+          PRIMARY KEY(uid, sector))
+```
+
+- WAL 模式；
+- `busy_timeout=5000`；
+- 线程本地连接；
+- 保存密钥时保留已有非空值。
+
+### Dump 格式
+
+| 扩展名 | 说明 |
+|---|---|
+| `.dump/.mfd/.bin` | 原始二进制 |
+| `.mct` | Mifare Classic Tool 文本 |
+| `.eml` | 每行一个块 |
+| `.json` | 带元数据 |
+| `.txt` | 可读文本（扇区横幅 + ASCII） |
+
+### 字典
+
+- `std.keys`：3 条标准高频；
+- `hotel-std.keys`：酒店门锁；
+- `extended-std.keys`：2477 条；
+- `extended-std_share_key_1..8.keys`：约 7.1 万条共享字典；
+- 合计约 7.4 万条（含重复）。
+- 解析大字典有性能成本，新增 UI 逻辑时请避免重复全量解析。
+
+---
+
+## 14. UART MCP（调试串口时）
+
+项目已接入 `uart-mcp`，涉及 COM 口操作时优先使用 MCP 工具：
+
+- `list_ports` / `open_port` / `send_data` / `read_data` / `create_session`。
+
+注意：
+
+- uart-mcp 直接打开串口，绕过 `SerialWorker` 的独占与 DTR/RTS 保护；
+- 不要与 `main.py` 同时占用同一 COM 口；
+- 调试广播器时只读不发；
+- 依赖 `mcp<2`，安装命令见项目环境配置。
+
+---
+
+## 15. Agent 开工清单
+
+修改前：
+
+- [ ] 确认要改的层（protocol / model / transport / adapter / service / ui）。
+- [ ] 搜索是否已有同类实现，避免重复造轮子。
+- [ ] 涉及硬件时，确认 DTR/RTS、独占锁、Block 0 保护。
+- [ ] 涉及 UI 时，确认耗时逻辑不在主线程。
+
+修改后：
+
+- [ ] `python tests/run_tests.py` 全绿。
+- [ ] 新增/修改功能有对应测试，尤其是克隆、魔术卡、字典、自动探测。
+- [ ] 无 UTF-8/BOM 问题。
+- [ ] 未提交代码，除非用户明确要求。
+- [ ] 若改变公共接口，更新本文件与相关门面导出。
+
+---
+
+**最后更新依据**：基于当前工作区源码的全量静态分析；测试基线 96 项通过。若代码已变化，请以实际源码为准并更新本文件。
