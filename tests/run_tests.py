@@ -2515,6 +2515,1174 @@ class Test16MagicCardCloneWizardAndAttackRunner(unittest.TestCase):
             w.close()
 
 
+class Test17AnalysisReportFixes(unittest.TestCase):
+    """针对 ProjectAnalysisReport 第 13 节缺陷修复的回归测试"""
+
+    @classmethod
+    def setUpClass(cls):
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
+    class FakeSerial:
+        def __init__(self, baudrate=115200, buffer=b""):
+            self.baudrate = baudrate
+            self._buf = bytearray(buffer)
+            self.writes = []
+            self.dtr = False
+            self.rts = False
+            self.is_open = True
+
+        @property
+        def in_waiting(self):
+            return len(self._buf)
+
+        def read(self, size=1):
+            data = bytes(self._buf[:size])
+            del self._buf[:size]
+            return data
+
+        def write(self, data):
+            self.writes.append(bytes(data))
+            return len(data)
+
+        def flush(self):
+            pass
+
+        def reset_input_buffer(self):
+            pass
+
+        def reset_output_buffer(self):
+            pass
+
+    def test_clone_wizard_uses_worker_constants_and_dynamic_sectors(self):
+        from unittest.mock import patch
+        from core.models.dump import MifareDump
+        from core.services.card_worker import CardOperationWorker
+        from ui.clone_wizard_dialog import CloneWizardDialog
+
+        class FakeWorker:
+            def is_connected(self):
+                return True
+
+        with patch.object(CardOperationWorker, "start", return_value=None):
+            dlg = CloneWizardDialog(FakeWorker(), is_4k=False)
+            try:
+                dlg._on_start_read_source()
+                op = dlg.card_op_worker
+                self.assertEqual(op.op_type, CardOperationWorker.OP_READ_CARD)
+                self.assertEqual(list(op.target_sectors), list(range(16)))
+                self.assertFalse(op.is_4k)
+            finally:
+                dlg.close()
+
+            dlg4 = CloneWizardDialog(FakeWorker(), is_4k=True)
+            try:
+                dlg4._on_start_read_source()
+                op4 = dlg4.card_op_worker
+                self.assertEqual(op4.op_type, CardOperationWorker.OP_READ_CARD)
+                self.assertEqual(list(op4.target_sectors), list(range(40)))
+                self.assertTrue(op4.is_4k)
+
+                dlg4.source_dump = MifareDump(is_4k=True)
+                dlg4._on_start_write_target()
+                wop = dlg4.card_op_worker
+                self.assertEqual(wop.op_type, CardOperationWorker.OP_WRITE_CARD)
+                self.assertEqual(list(wop.target_sectors), list(range(40)))
+                self.assertTrue(wop.is_4k)
+            finally:
+                dlg4.close()
+
+    def test_clone_wizard_4k_report_and_save_mct(self):
+        from unittest.mock import patch
+        from core.models.dump import MifareDump
+        from ui.clone_wizard_dialog import CloneWizardDialog
+
+        dlg = CloneWizardDialog(serial_worker=None)
+        try:
+            dump = MifareDump(is_4k=True)
+            dump.set_uid(bytes([0x12, 0x34, 0x56, 0x78]))
+            dlg.source_dump = dump
+            dlg._populate_report()
+            self.assertEqual(dlg.tbl_report.item(1, 1).text(), "Mifare Classic 4K (S70)")
+            self.assertEqual(dlg.tbl_report.item(2, 1).text(), "40 扇区 (256 块)")
+
+            with tempfile.TemporaryDirectory() as td:
+                out = os.path.join(td, "clone.mct")
+                with patch("ui.clone_wizard_dialog.QFileDialog.getSaveFileName", return_value=(out, "MCT")), \
+                        patch("ui.clone_wizard_dialog.QMessageBox.information"):
+                    dlg._on_save_clone_dump()
+                self.assertTrue(os.path.exists(out))
+                with open(out, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn("+Sector: 0", content)
+        finally:
+            dlg.close()
+
+    def test_card_database_upsert_preserves_created_at_and_swipe_count(self):
+        from core.card_db import CardDatabase
+
+        with tempfile.TemporaryDirectory() as td:
+            db = CardDatabase(os.path.join(td, "cards.db"))
+            try:
+                conv = {"dec_10d_rev": "1234567890", "wiegand_26": "1", "wiegand_34": "2"}
+                first = db.upsert_card(
+                    "AA BB CC DD", card_name="克隆卡", card_holder="归档",
+                    card_type="Mifare Classic 1K", note="note", conv_info=conv
+                )
+                self.assertEqual(first["uid"], "AA BB CC DD")
+                card = db.get_card("AA BB CC DD")
+                self.assertIsNotNone(card)
+                self.assertEqual(card["card_name"], "克隆卡")
+                self.assertEqual(card["dec_10d"], "1234567890")
+                created_at = card["created_at"]
+                swipe_count = card["swipe_count"]
+
+                db.upsert_card("AA BB CC DD", card_name="新名称", card_holder="新持有人")
+                updated = db.get_card("AA BB CC DD")
+                self.assertEqual(updated["card_name"], "新名称")
+                self.assertEqual(updated["card_holder"], "新持有人")
+                self.assertEqual(updated["created_at"], created_at)
+                self.assertEqual(updated["swipe_count"], swipe_count)
+            finally:
+                db.close()
+
+    def test_sector_table_clone_wizard_passes_db(self):
+        from unittest.mock import patch
+        from core.models.dump import MifareDump
+        from ui.sector_table import SectorTableWidget
+
+        with patch("ui.clone_wizard_dialog.CloneWizardDialog") as mock_dlg:
+            widget = SectorTableWidget(serial_worker=None)
+            try:
+                sentinel = object()
+                widget.set_database(sentinel)
+                widget.dump = MifareDump(is_4k=True)
+                widget._on_open_clone_wizard()
+                mock_dlg.assert_called_once()
+                kwargs = mock_dlg.call_args.kwargs
+                self.assertIs(kwargs["card_db"], sentinel)
+                self.assertTrue(kwargs["is_4k"])
+                mock_dlg.return_value.exec.assert_called_once()
+            finally:
+                widget.close()
+
+    def test_magic_factory_wipe_reads_sector_info_keys(self):
+        from unittest.mock import patch
+        from PyQt6.QtWidgets import QMessageBox
+        from core.models.dump import MifareDump
+        from ui.magic_card_dialog import MagicCardDialog
+
+        dlg = MagicCardDialog(serial_worker=None)
+        try:
+            dlg.current_dump = MifareDump()
+            with patch("ui.magic_card_dialog.QMessageBox.question",
+                       return_value=QMessageBox.StandardButton.Yes), \
+                    patch.object(dlg, "_start_worker") as start_worker:
+                dlg._on_start_factory_wipe()
+                start_worker.assert_called_once()
+                args = start_worker.call_args.args
+                self.assertEqual(args[0], "factory_wipe")
+                self.assertEqual(args[1]["known_keys"][0], b"\xFF" * 6)
+        finally:
+            dlg.close()
+
+    def test_auto_probe_38400_broadcaster_without_downlink(self):
+        from core.adapters.broadcaster_adapter import BroadcasterAdapter
+        from core.adapters.factory import ReaderAdapterFactory
+
+        ser = self.FakeSerial(baudrate=38400)
+        adapter = ReaderAdapterFactory.probe_device(ser)
+        self.assertIsInstance(adapter, BroadcasterAdapter)
+        self.assertEqual(ser.writes, [])
+
+    def test_auto_probe_preserves_first_aabb_frame(self):
+        from core.adapters.broadcaster_adapter import BroadcasterAdapter
+        from core.adapters.factory import ReaderAdapterFactory
+
+        frame = b"\xAA\xBB\x06\x01\x11\x22\x33\x44"
+        ser = self.FakeSerial(baudrate=115200, buffer=frame)
+        adapter = ReaderAdapterFactory.probe_device(ser)
+        self.assertIsInstance(adapter, BroadcasterAdapter)
+        self.assertEqual(adapter.initial_rx_data, frame)
+        self.assertEqual(ser.writes, [])
+
+    def test_pn532_init_requires_firmware_or_sam_response(self):
+        from unittest.mock import patch
+        from core.adapters.pn532_adapter import PN532Adapter
+
+        ser = self.FakeSerial()
+        adapter = PN532Adapter()
+        with patch.object(adapter, "_send_and_receive", return_value=None):
+            self.assertFalse(adapter.init_device(ser))
+            self.assertIn("未响应", adapter.firmware_info)
+
+        adapter2 = PN532Adapter()
+        with patch.object(adapter2, "_send_and_receive", return_value=b"\x32\x01\x06\x07"):
+            self.assertTrue(adapter2.init_device(ser))
+            self.assertIn("PN532 v1.6", adapter2.firmware_info)
+
+    def test_pn532_firmware_and_card_presence_queries(self):
+        from unittest.mock import patch
+        from core.adapters.pn532_adapter import PN532Adapter
+
+        adapter = PN532Adapter()
+        adapter._last_ser = self.FakeSerial()
+        with patch.object(adapter, "_send_and_receive", return_value=b"\x32\x01\x06\x07"):
+            self.assertIn("PN532 v1.6", adapter.get_firmware_version())
+        with patch.object(adapter, "_send_and_receive", return_value=b"\x01\x01"):
+            self.assertTrue(adapter.is_card_present())
+        with patch.object(adapter, "_send_and_receive", return_value=b"\x00"):
+            self.assertFalse(adapter.is_card_present())
+
+    def test_apdu_le_fix_preserves_case3_data(self):
+        from core.adapters.pn532_adapter import PN532Adapter
+
+        adapter = PN532Adapter()
+        case3 = bytes.fromhex("00A4040003010203")
+        fixed3 = adapter._fix_apdu_le(case3, 0x0A)
+        self.assertEqual(fixed3, case3 + b"\x0A")
+
+        case4 = bytes.fromhex("00A404000301020300")
+        fixed4 = adapter._fix_apdu_le(case4, 0x0A)
+        self.assertEqual(fixed4[-1], 0x0A)
+        self.assertEqual(fixed4[:-1], case4[:-1])
+
+        four = bytes.fromhex("00840000")
+        self.assertEqual(adapter._fix_apdu_le(four, 0x08), four + b"\x08")
+
+        five = bytes.fromhex("00B0950000")
+        self.assertEqual(adapter._fix_apdu_le(five, 0x1E), five[:-1] + b"\x1E")
+
+    def test_apdu_get_response_loops_multiple_61xx(self):
+        from core.adapters.pn532_adapter import PN532Adapter
+
+        calls = []
+
+        def fake_exchange(ser, cmd, payload=b"", timeout=0.5):
+            calls.append(payload)
+            if len(calls) == 1:
+                return bytes([0x00, 0x61, 0x05])
+            if len(calls) == 2:
+                return bytes([0x00]) + bytes([0x11] * 5) + bytes([0x61, 0x03])
+            return bytes([0x00]) + bytes([0x22] * 3) + bytes([0x90, 0x00])
+
+        adapter = PN532Adapter()
+        adapter._send_and_receive = fake_exchange
+        res = adapter.send_apdu(self.FakeSerial(), bytes.fromhex("00B0950000"), auto_get_response=True)
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["data"], bytes([0x11] * 5 + [0x22] * 3))
+        self.assertEqual(res["original_sw_hex"], "6105")
+        self.assertEqual(len(calls), 3)
+
+    def test_key_manager_custom_keys_and_parse_cache(self):
+        from unittest.mock import patch
+        from core.services.key_manager import CUSTOM_KEYS_FILE, KeyManager
+
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(KeyManager, "get_keys_dir", return_value=td):
+                total = KeyManager.save_custom_keys(
+                    ["AABBCCDDEEFF", "aabbccddeeff", "bad", "112233445566"]
+                )
+                self.assertEqual(total, 2)
+                path = os.path.join(td, CUSTOM_KEYS_FILE)
+                first = KeyManager.parse_key_file(path)
+                self.assertEqual(len(first), 2)
+                first.append("DEADBEEF0000")
+                cached = KeyManager.parse_key_file(path)
+                self.assertEqual(len(cached), 2)
+
+                time.sleep(0.02)
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write("\nDEADBEEF0000\n")
+                updated = KeyManager.parse_key_file(path)
+                self.assertIn("DEADBEEF0000", updated)
+
+    def test_key_select_summary_is_incremental(self):
+        from unittest.mock import patch
+        from core.services.key_manager import KeyManager
+        from ui.key_select_dialog import KeySelectDialog
+
+        fake_files = [
+            {"filename": "a.keys", "filepath": "a.keys", "title": "A", "desc": "A",
+             "is_default": True, "priority": 1, "key_count": 2, "keys": ["AABBCCDDEEFF", "112233445566"]},
+            {"filename": "b.keys", "filepath": "b.keys", "title": "B", "desc": "B",
+             "is_default": False, "priority": 2, "key_count": 1, "keys": ["112233445566"]},
+        ]
+        with patch.object(KeyManager, "list_available_files", return_value=fake_files), \
+                patch.object(KeyManager, "load_combined_keys",
+                             side_effect=AssertionError("summary must not merge all keys")):
+            dlg = KeySelectDialog()
+            try:
+                before = dlg.lbl_summary.text()
+                chk = dlg.checkboxes["b.keys"]
+                chk.setChecked(not chk.isChecked())
+                self.app.processEvents()
+                self.assertTrue(dlg.lbl_summary.text().startswith("📊"))
+                self.assertNotEqual(before, dlg.lbl_summary.text())
+            finally:
+                dlg.close()
+
+    def test_crack_scope_dialog_4k_block_ranges(self):
+        from core.models.dump import MifareDump
+        from ui.crack_dialogs import SectorScopeDialog
+
+        dlg = SectorScopeDialog(dump=MifareDump(is_4k=True))
+        try:
+            self.assertEqual(dlg.table.item(32, 2).text(), "128-143")
+            self.assertEqual(dlg.table.item(33, 2).text(), "144-159")
+        finally:
+            dlg.close()
+
+    def test_virtual_adapter_enforces_auth_and_access_bits(self):
+        from core.adapters.extensions.virtual_adapter import VirtualDumpReaderAdapter
+        from core.models.access_bits import AccessBitsEncoder
+        from core.models.dump import MifareDump
+
+        dump = MifareDump(is_4k=False)
+        key_a = b"\xA0" * 6
+        key_b = b"\xFF" * 6
+        access = AccessBitsEncoder.encode([(0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 0, 0)])
+        dump.set_block(7, key_a + access + key_b)
+
+        adapter = VirtualDumpReaderAdapter(dump)
+        self.assertIsNone(adapter.read_block(None, 4))
+        self.assertFalse(adapter.write_block(None, 4, b"\x42" * 16))
+        self.assertTrue(adapter.authenticate(None, 4, "A", key_a))
+        self.assertEqual(adapter.read_block(None, 4), b"\x00" * 16)
+        self.assertFalse(adapter.write_block(None, 4, b"\x42" * 16))
+
+    def test_tcp_transport_roundtrip_and_modbus_factory(self):
+        import socket
+        import threading
+        from core.transport.tcp_transport import ModbusTcpTransport, TcpTransport
+        from core.transport.factory import TransportFactory
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+
+        def echo_server():
+            try:
+                conn, _ = server.accept()
+                while True:
+                    data = conn.recv(1024)
+                    if not data:
+                        break
+                    conn.sendall(data)
+                conn.close()
+            except Exception:
+                pass
+
+        thread = threading.Thread(target=echo_server, daemon=True)
+        thread.start()
+        transport = TcpTransport("127.0.0.1", port, timeout=0.5)
+        try:
+            self.assertTrue(transport.open())
+            self.assertEqual(transport.write(b"PING"), 4)
+            self.assertEqual(transport.read(4, timeout=1.0), b"PING")
+            self.assertEqual(int(transport.in_waiting), 0)
+        finally:
+            transport.close()
+            server.close()
+
+        modbus = TransportFactory.create_transport("modbus", host="127.0.0.1", port=502)
+        self.assertIsInstance(modbus, ModbusTcpTransport)
+
+    def test_broadcaster_firmware_probe_sends_no_downlink(self):
+        from core.adapters.broadcaster_adapter import BroadcasterAdapter
+        from core.services.card_worker import CardOperationWorker
+
+        class FakeWorker:
+            def __init__(self):
+                self.adapter = BroadcasterAdapter()
+                self._serial = Test17AnalysisReportFixes.FakeSerial()
+
+        worker = FakeWorker()
+        op = CardOperationWorker(worker, CardOperationWorker.OP_PROBE_FIRMWARE)
+        results = []
+        op.sig_finished.connect(lambda ok, msg, data: results.append((ok, msg, data)))
+        op._do_probe_firmware()
+        self.assertTrue(results)
+        self.assertTrue(results[0][0])
+        self.assertIn("单向广播", results[0][1])
+        self.assertEqual(worker._serial.writes, [])
+
+    def test_read_abort_emits_finished_signal(self):
+        from core.services.card_worker import CardOperationWorker
+
+        class FakeWorker:
+            def authenticate(self, block, key_type, key, timeout=0.25):
+                return True
+
+        op = CardOperationWorker(FakeWorker(), CardOperationWorker.OP_READ_CARD, target_sectors=[0])
+        results = []
+        op.sig_finished.connect(lambda ok, msg, data: results.append((ok, msg, data)))
+        op._abort = True
+        op._do_read_card()
+        self.assertTrue(results)
+        self.assertFalse(results[0][0])
+        self.assertIn("中止", results[0][1])
+
+    def test_read_sector_abort_emits_finished_signal(self):
+        from core.services.card_worker import CardOperationWorker
+
+        class FakeWorker:
+            def authenticate(self, block, key_type, key, timeout=0.25):
+                return True
+
+        op = CardOperationWorker(
+            FakeWorker(), CardOperationWorker.OP_READ_SECTOR,
+            target_sectors=[0],
+            manual_key={"key_type": "A", "key": b"\xFF" * 6},
+        )
+        results = []
+        op.sig_finished.connect(lambda ok, msg, data: results.append((ok, msg, data)))
+        op._abort = True
+        op._do_read_sector()
+        self.assertTrue(results)
+        self.assertFalse(results[0][0])
+        self.assertIn("中止", results[0][1])
+
+    def test_dictionary_save_recovered_keys_uses_key_manager(self):
+        from unittest.mock import patch
+        from PyQt6.QtWidgets import QTableWidgetItem
+        from core.services.key_manager import KeyManager
+        from ui.dictionary_tools import DictionaryToolsWidget
+
+        widget = DictionaryToolsWidget()
+        try:
+            widget.tbl_recovered_keys.setRowCount(1)
+            widget.tbl_recovered_keys.setItem(0, 2, QTableWidgetItem("AABBCCDDEEFF"))
+            with patch.object(KeyManager, "save_custom_keys", return_value=7) as save, \
+                    patch.object(widget, "_dict_refresh_files") as refresh, \
+                    patch("ui.dictionary_tools.QMessageBox.information"):
+                widget._on_save_recovered_keys()
+                save.assert_called_once_with(["AABBCCDDEEFF"])
+                refresh.assert_called_once()
+        finally:
+            widget.close()
+
+
+class Test18CrackOptimizationAndCapabilities(unittest.TestCase):
+    """破解性能优化、设备能力探测与 M1T 工具链接入验证"""
+
+    def test_crack_fast_mode_stops_after_first_key(self):
+        from core.services.card_worker import CardOperationWorker
+
+        calls = []
+
+        class MockWorker:
+            def is_connected(self):
+                return True
+
+            def authenticate(self, block, key_type, key, timeout=0.25):
+                calls.append((block, key_type, key.hex().upper()))
+                return key_type == "A" and key == b"\xFF" * 6
+
+            def is_card_present(self):
+                return True
+
+        worker = CardOperationWorker(
+            MockWorker(),
+            op_type=CardOperationWorker.OP_CRACK_KEYS,
+            target_sectors=[0],
+            custom_keys=["FFFFFFFFFFFF", "A0A1A2A3A4A5", "123456789ABC"],
+            crack_mode=CardOperationWorker.CRACK_MODE_FAST,
+        )
+        results = {}
+        worker.sig_sector_cracked.connect(lambda s, a, b: results.update({s: (a, b)}))
+        worker._do_crack_keys()
+
+        self.assertEqual(results[0][0], "FFFFFFFFFFFF")
+        self.assertFalse(any(call[1] == "B" for call in calls), "快速模式命中 Key A 后不应再尝试 Key B")
+
+    def test_crack_both_mode_recovers_two_different_keys(self):
+        from core.services.card_worker import CardOperationWorker
+
+        calls = []
+
+        class MockWorker:
+            def is_connected(self):
+                return True
+
+            def authenticate(self, block, key_type, key, timeout=0.25):
+                calls.append((block, key_type, key.hex().upper()))
+                if key_type == "A" and key == b"\xFF" * 6:
+                    return True
+                if key_type == "B" and key == b"\xAA" * 6:
+                    return True
+                return False
+
+            def is_card_present(self):
+                return True
+
+        worker = CardOperationWorker(
+            MockWorker(),
+            op_type=CardOperationWorker.OP_CRACK_KEYS,
+            target_sectors=[0],
+            custom_keys=["FFFFFFFFFFFF", "AAAAAAAAAAAA"],
+            crack_mode=CardOperationWorker.CRACK_MODE_BOTH,
+        )
+        results = {}
+        worker.sig_sector_cracked.connect(lambda s, a, b: results.update({s: (a, b)}))
+        worker._do_crack_keys()
+
+        self.assertEqual(results[0][0], "FFFFFFFFFFFF")
+        self.assertEqual(results[0][1], "AAAAAAAAAAAA")
+
+    def test_crack_a_only_and_b_only_modes(self):
+        from core.services.card_worker import CardOperationWorker
+
+        class MockWorker:
+            def is_connected(self):
+                return True
+
+            def authenticate(self, block, key_type, key, timeout=0.25):
+                return key_type == "B" and key == b"\xAA" * 6
+
+            def is_card_present(self):
+                return True
+
+        a_results = {}
+        worker_a = CardOperationWorker(
+            MockWorker(),
+            op_type=CardOperationWorker.OP_CRACK_KEYS,
+            target_sectors=[0],
+            custom_keys=["AAAAAAAAAAAA"],
+            crack_mode=CardOperationWorker.CRACK_MODE_A,
+        )
+        worker_a.sig_sector_cracked.connect(lambda s, a, b: a_results.update({s: (a, b)}))
+        worker_a._do_crack_keys()
+        self.assertEqual(a_results, {})
+
+        b_results = {}
+        worker_b = CardOperationWorker(
+            MockWorker(),
+            op_type=CardOperationWorker.OP_CRACK_KEYS,
+            target_sectors=[0],
+            custom_keys=["AAAAAAAAAAAA"],
+            crack_mode=CardOperationWorker.CRACK_MODE_B,
+        )
+        worker_b.sig_sector_cracked.connect(lambda s, a, b: b_results.update({s: (a, b)}))
+        worker_b._do_crack_keys()
+        self.assertEqual(b_results[0][1], "AAAAAAAAAAAA")
+
+    def test_crack_key_major_reuses_key_across_sectors(self):
+        from core.services.card_worker import CardOperationWorker
+
+        target_key = bytes.fromhex("ABCDEFABCDEF")
+        calls = []
+
+        class MockWorker:
+            def is_connected(self):
+                return True
+
+            def authenticate(self, block, key_type, key, timeout=0.25):
+                calls.append((block, key_type, key.hex().upper()))
+                return key_type == "A" and key == target_key
+
+            def is_card_present(self):
+                return True
+
+        keys = [f"{i:012X}" for i in range(1, 13)]
+        keys[-1] = "ABCDEFABCDEF"
+        worker = CardOperationWorker(
+            MockWorker(),
+            op_type=CardOperationWorker.OP_CRACK_KEYS,
+            target_sectors=[0, 1],
+            custom_keys=keys,
+        )
+        results = {}
+        logs = []
+        worker.sig_sector_cracked.connect(lambda s, a, b: results.update({s: (a, b)}))
+        worker.sig_log.connect(logs.append)
+        worker._do_crack_keys()
+
+        self.assertEqual(results[0][0], "ABCDEFABCDEF")
+        self.assertEqual(results[1][0], "ABCDEFABCDEF")
+        self.assertTrue(any("key-major" in line for line in logs))
+        target_calls = [call for call in calls if call[2] == "ABCDEFABCDEF"]
+        self.assertEqual(len(target_calls), 2, "同一密钥应在两个扇区各只认证一次，不应重复尝试 Key B")
+
+    def test_crack_reuses_reactivate_result_without_extra_presence_query(self):
+        from core.services.card_worker import CardOperationWorker
+
+        presence_calls = 0
+        reactivate_calls = 0
+
+        class MockWorker:
+            def is_connected(self):
+                return True
+
+            def authenticate(self, block, key_type, key, timeout=0.25):
+                return False
+
+            def reactivate_target(self):
+                nonlocal reactivate_calls
+                reactivate_calls += 1
+                return True
+
+            def is_card_present(self):
+                nonlocal presence_calls
+                presence_calls += 1
+                return True
+
+        worker = CardOperationWorker(
+            MockWorker(),
+            op_type=CardOperationWorker.OP_CRACK_KEYS,
+            target_sectors=[0],
+            custom_keys=["111111111111", "222222222222", "333333333333"],
+        )
+        worker._do_crack_keys()
+
+        self.assertGreater(reactivate_calls, 0)
+        self.assertEqual(presence_calls, 0, "应复用 reactivate_target 结果，不再额外发送 is_card_present 查询")
+
+    def test_capabilities_pn532_broadcaster_and_tool_annotation(self):
+        from core.adapters.pn532_adapter import PN532Adapter
+        from core.adapters.broadcaster_adapter import BroadcasterAdapter
+        from core.services.capability_probe import build_device_capabilities
+
+        pn532 = PN532Adapter()
+        pn532._probe_fw_ok = True
+        pn532._probe_sam_ok = True
+        pn532._probe_checked = True
+        pn532.firmware_info = "PN532 v1.6 (IC=0x32, Support=0x07)"
+        caps = pn532.get_capabilities()
+        self.assertEqual(caps["device_name"], pn532.device_name)
+        self.assertTrue(any(f["name"].startswith("PN532 HSU") and f["status"] == "supported" for f in caps["features"]))
+        self.assertTrue(any("hardnested" in f["name"].lower() for f in caps["features"]))
+
+        no_tools = {
+            "mfoc": False, "mfcuk": False, "libnfc_hardnested": False,
+            "mfdetect": False, "nfc_list": False, "libnfc_dll": False, "crypto1_bs": False,
+        }
+        merged = build_device_capabilities(
+            pn532, connection="serial", port="COM3", baudrate=115200,
+            bin_dir="Z:/missing-nfc-bin", tool_status=no_tools,
+        )
+        self.assertEqual(merged["port"], "COM3")
+        hardnested = next(f for f in merged["features"] if "hardnested" in f["name"].lower())
+        self.assertEqual(hardnested["status"], "unsupported")
+        self.assertIn("未找到", hardnested["detail"])
+
+        broadcaster = BroadcasterAdapter()
+        b_caps = broadcaster.get_capabilities()
+        self.assertFalse(b_caps["is_bidirectional"])
+        self.assertTrue(any(f["status"] == "unsupported" and "认证" in f["name"] for f in b_caps["features"]))
+
+    def test_device_capabilities_dialog_offscreen(self):
+        from PyQt6.QtWidgets import QApplication
+        from ui.device_capabilities_dialog import DeviceCapabilitiesDialog
+
+        app = QApplication.instance() or QApplication(sys.argv)
+        caps = {
+            "device_name": "Test Reader",
+            "firmware_info": "v1.0",
+            "is_bidirectional": True,
+            "connection": "serial",
+            "port": "COM3",
+            "baudrate": 115200,
+            "features": [
+                {"name": "功能 A", "status": "supported", "detail": "可用"},
+                {"name": "功能 B", "status": "needs_card", "detail": "需贴卡"},
+            ],
+            "tools": {"mfoc": True, "mfcuk": False},
+            "notes": ["测试提示"],
+        }
+        dialog = DeviceCapabilitiesDialog(caps)
+        try:
+            self.assertEqual(dialog.should_show_next_time(), True)
+            dialog.chk_dont_show.setChecked(True)
+            self.assertFalse(dialog.should_show_next_time())
+        finally:
+            dialog.close()
+
+    def test_serial_worker_exposes_capability_signal(self):
+        from core.serial_worker import SerialWorker
+        worker = SerialWorker(port="COM_MOCK")
+        self.assertTrue(hasattr(worker, "sig_device_capabilities"))
+
+    def test_m1t_toolchain_present(self):
+        tool_dir = os.path.join(project_dir, "tools", "m1t", "nfc-bin")
+        for name in ("mfoc.exe", "mfcuk.exe", "libnfc_hardnested.exe", "nfc-list.exe", "libnfc.dll"):
+            self.assertTrue(os.path.exists(os.path.join(tool_dir, name)), f"缺少工具 {name}")
+        self.assertTrue(os.path.exists(os.path.join(project_dir, "tools", "m1t", "README.md")))
+
+    def test_hardnested_libnfc_command_arguments(self):
+        from core.services.attack_runner import AttackRunner
+
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "libnfc_hardnested.exe"), "wb") as f:
+                f.write(b"")
+            runner = AttackRunner(bin_dir=td)
+            captured = {}
+            runner._start_process = lambda exe, args, desc: captured.update({"exe": exe, "args": args, "desc": desc})
+            runner.run_hardnested("FFFFFFFFFFFF", known_sector=0, target_sector=1)
+            self.assertEqual(captured["args"], ["FFFFFFFFFFFF", "0", "A", "4", "A"])
+
+    def test_crack_scope_dialog_mode_selector(self):
+        from PyQt6.QtWidgets import QApplication
+        from ui.crack_dialogs import SectorScopeDialog
+        from core.models.dump import MifareDump
+        from core.services.card_worker import CardOperationWorker
+
+        app = QApplication.instance() or QApplication(sys.argv)
+        dialog = SectorScopeDialog(dump=MifareDump())
+        try:
+            self.assertEqual(dialog.cmb_crack_mode.count(), 4)
+            self.assertEqual(dialog.get_crack_mode(), CardOperationWorker.CRACK_MODE_FAST)
+            dialog.cmb_crack_mode.setCurrentIndex(1)
+            self.assertEqual(dialog.get_crack_mode(), CardOperationWorker.CRACK_MODE_BOTH)
+        finally:
+            dialog.close()
+
+    def test_attack_runner_decodes_gbk_and_utf8_output(self):
+        from core.services.attack_runner import AttackRunner
+
+        self.assertEqual(AttackRunner._decode_output("正在检测卡片".encode("gbk")), "正在检测卡片")
+        self.assertEqual(AttackRunner._decode_output("正在检测卡片".encode("utf-8")), "正在检测卡片")
+        self.assertEqual(AttackRunner._decode_output("MIFARE Classic".encode("ascii")), "MIFARE Classic")
+
+    def test_attack_runner_handles_split_gbk_and_cr_progress(self):
+        from PyQt6.QtWidgets import QApplication
+        from core.services.attack_runner import AttackRunner
+
+        app = QApplication.instance() or QApplication(sys.argv)
+        with tempfile.TemporaryDirectory() as td:
+            runner = AttackRunner(bin_dir=td)
+            lines = []
+            runner.sig_output.connect(lines.append)
+
+            payload = "正在检测 Mifare Classic 1k 卡片\n".encode("gbk")
+            runner._consume_output(payload[:1], "stdout")
+            runner._consume_output(payload[1:], "stdout")
+            self.assertEqual(lines[0], "正在检测 Mifare Classic 1k 卡片")
+
+            runner._consume_output("图像: 进度 10%\r图像: 进度 20%\r".encode("gbk"), "stdout")
+            self.assertIn("图像: 进度 10%", lines)
+            self.assertIn("图像: 进度 20%", lines)
+
+    def test_attack_runner_flushes_trailing_output(self):
+        from PyQt6.QtWidgets import QApplication
+        from core.services.attack_runner import AttackRunner
+
+        app = QApplication.instance() or QApplication(sys.argv)
+        with tempfile.TemporaryDirectory() as td:
+            runner = AttackRunner(bin_dir=td)
+            lines = []
+            runner.sig_output.connect(lines.append)
+            runner._consume_output("没有换行的末尾".encode("gbk"), "stdout")
+            self.assertEqual(lines, [])
+            runner._flush_output("stdout")
+            self.assertEqual(lines, ["没有换行的末尾"])
+
+    def test_attack_runner_sets_nfc_device_and_working_directory(self):
+        from PyQt6.QtCore import QProcess
+        from PyQt6.QtWidgets import QApplication
+        from core.services.attack_runner import AttackRunner
+
+        app = QApplication.instance() or QApplication(sys.argv)
+        with tempfile.TemporaryDirectory() as td:
+            runner = AttackRunner(bin_dir=td)
+            runner.set_device_context("COM3", 115200, "serial")
+            process = QProcess()
+            device = runner._apply_process_context(process)
+            self.assertEqual(device, "pn532_uart:COM3:115200")
+            self.assertEqual(process.processEnvironment().value("NFC_DEVICE"), "pn532_uart:COM3:115200")
+            self.assertEqual(
+                os.path.normcase(os.path.abspath(process.workingDirectory())),
+                os.path.normcase(os.path.abspath(td)),
+            )
+
+    def test_attack_runner_detects_libnfc_driver_variant(self):
+        from core.services.attack_runner import AttackRunner
+
+        with tempfile.TemporaryDirectory() as td:
+            default_dll = os.path.join(td, "libnfc.dll")
+            pn532_dll = os.path.join(td, "libnfc(532).dll")
+            with open(default_dll, "wb") as f:
+                f.write(b"generic-libnfc")
+            with open(pn532_dll, "wb") as f:
+                f.write(b"pn532-uart-libnfc")
+
+            runner = AttackRunner(bin_dir=td)
+            info = runner.check_libnfc_driver()
+            self.assertTrue(info["default_present"])
+            self.assertTrue(info["pn532_present"])
+            self.assertFalse(info["is_pn532"])
+            self.assertIn("libnfc(532).dll", str(info["hint"]))
+
+            with open(default_dll, "wb") as f:
+                f.write(b"pn532-uart-libnfc")
+            info2 = runner.check_libnfc_driver()
+            self.assertTrue(info2["is_pn532"])
+
+    def test_dictionary_tools_blocks_attack_when_serial_connected(self):
+        from unittest.mock import patch
+        from PyQt6.QtWidgets import QApplication
+        from ui.dictionary_tools import DictionaryToolsWidget
+
+        app = QApplication.instance() or QApplication(sys.argv)
+
+        class FakeConnectedWorker:
+            port = "COM3"
+            baudrate = 115200
+            conn_type = "serial"
+
+            def is_connected(self):
+                return True
+
+            def isRunning(self):
+                return True
+
+        widget = DictionaryToolsWidget(serial_worker=FakeConnectedWorker())
+        try:
+            started = []
+            widget.attack_runner.run_mfoc = lambda **kwargs: started.append(kwargs)
+            with patch("ui.dictionary_tools.QMessageBox.warning") as warn:
+                widget._on_start_attack()
+                warn.assert_called_once()
+            self.assertEqual(started, [])
+        finally:
+            widget.close()
+
+    def test_dictionary_tools_sets_device_context_when_idle(self):
+        from unittest.mock import patch
+        from PyQt6.QtWidgets import QApplication
+        from ui.dictionary_tools import DictionaryToolsWidget
+
+        app = QApplication.instance() or QApplication(sys.argv)
+
+        class FakeIdleWorker:
+            port = "COM7"
+            baudrate = 115200
+            conn_type = "serial"
+
+            def is_connected(self):
+                return False
+
+            def isRunning(self):
+                return False
+
+        widget = DictionaryToolsWidget(serial_worker=FakeIdleWorker())
+        try:
+            started = []
+            widget.attack_runner.run_mfoc = lambda **kwargs: started.append(kwargs)
+            with patch.object(widget, "_refresh_tool_status"):
+                widget._on_start_attack()
+            self.assertEqual(widget.attack_runner.get_nfc_device_string(), "pn532_uart:COM7:115200")
+            self.assertEqual(len(started), 1)
+        finally:
+            widget.close()
+
+
+class Test19CodeReviewReportImprovements(unittest.TestCase):
+    """验证代码审查报告 (CodeReviewReport.md) 各改进项的正确性与稳定性"""
+
+    def test_serial_transport_toctou_and_lock_protection(self):
+        """测试 SerialTransport 的 TOCTOU 竞态修复与锁保护机制"""
+        from core.transport.serial_transport import SerialTransport
+        from core.transport.base import TransportError
+
+        trans = SerialTransport(port="COM99", baudrate=115200)
+        self.assertFalse(trans.is_open)
+
+        # 1. 未连接时写与读均在锁内正确抛出 TransportError
+        with self.assertRaises(TransportError):
+            trans.write(b"\x00\x00")
+
+        with self.assertRaises(TransportError):
+            trans.read(1)
+
+        # 2. flush 与 reset 缓冲区在未连接状态下不崩溃，安全返回
+        trans.flush()
+        trans.reset_input_buffer()
+        trans.reset_output_buffer()
+
+    def test_mifare_dump_check_access_bits_valid_extracted(self):
+        """测试 MifareDump 提取的 _check_access_bits_valid 静态校验方法"""
+        from core.models.dump import MifareDump
+
+        # 出厂默认控制字 FF 07 80 69 必须合法
+        default_ac = bytes([0xFF, 0x07, 0x80, 0x69])
+        self.assertTrue(MifareDump._check_access_bits_valid(default_ac))
+
+        # 只读控制字 08 77 8F 69 必须合法
+        readonly_ac = bytes([0x08, 0x77, 0x8F, 0x69])
+        self.assertTrue(MifareDump._check_access_bits_valid(readonly_ac))
+
+        # 损坏控制字 (取反校验失败) 必须返回 False
+        corrupted_ac = bytes([0x00, 0x00, 0x00, 0x00])
+        self.assertFalse(MifareDump._check_access_bits_valid(corrupted_ac))
+
+        # 长度不足 4 字节必须返回 False
+        self.assertFalse(MifareDump._check_access_bits_valid(bytes([0xFF, 0x07, 0x80])))
+
+    def test_mifare_dump_load_mct_sectorless_blocks(self):
+        """测试 MifareDump.load_mct 解析无 +Sector: 标记的纯连续 Hex 块"""
+        import tempfile
+        from core.models.dump import MifareDump, BlockState
+
+        mct_content = (
+            "11223344440804000102030405060708\n"
+            "00000000000000000000000000000000\n"
+            "00000000000000000000000000000000\n"
+            "FFFFFFFFFFFFFF078069FFFFFFFFFFFF\n"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".mct", delete=False) as f:
+            f.write(mct_content)
+            tmp_path = f.name
+
+        try:
+            dump = MifareDump()
+            ok = dump.load_mct(tmp_path)
+            self.assertTrue(ok)
+            self.assertEqual(dump.get_block_state(0), BlockState.READ_OK)
+            self.assertEqual(dump.get_block_state(3), BlockState.READ_OK)
+            self.assertEqual(dump.get_block(0), bytes.fromhex("11223344440804000102030405060708"))
+            self.assertEqual(dump.get_block(3), bytes.fromhex("FFFFFFFFFFFFFF078069FFFFFFFFFFFF"))
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    def test_key_manager_dir_cache(self):
+        """测试 KeyManager.list_available_files 目录级缓存复用"""
+        from core.services.key_manager import KeyManager
+
+        files_1 = KeyManager.list_available_files()
+        self.assertGreater(len(files_1), 0)
+        self.assertIsNotNone(KeyManager._dir_cache)
+
+        # 再次调用必须命中目录缓存
+        files_2 = KeyManager.list_available_files()
+        self.assertEqual(len(files_1), len(files_2))
+        self.assertEqual(files_1[0]["filename"], files_2[0]["filename"])
+
+    def test_card_database_close_idempotent_and_safe(self):
+        """测试 CardDatabase.close() 并发保护与幂等性"""
+        import tempfile
+        import sqlite3
+        from core.card_db import CardDatabase
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            tmp_db = f.name
+
+        try:
+            db = CardDatabase(tmp_db)
+            db.upsert_card(uid="AABBCCDD", card_name="测试卡")
+            self.assertIsNotNone(db.get_card("AABBCCDD"))
+
+            # 首次正常关闭
+            db.close()
+            self.assertTrue(db._closed)
+
+            # 多次调用 close 幂等且不报错
+            db.close()
+
+            # 关闭后继续操作抛出 ProgrammingError
+            with self.assertRaises(sqlite3.ProgrammingError):
+                db.get_card("AABBCCDD")
+        finally:
+            try:
+                os.remove(tmp_db)
+            except OSError:
+                pass
+
+    def test_pn532_adapter_mixins_and_sam_constants(self):
+        """测试 PN532Adapter 组合 Mixin 解耦架构与显式常量"""
+        from core.adapters.pn532_adapter import PN532Adapter
+        from core.adapters.pn532_id_card import PN532IdCardMixin
+        from core.adapters.pn532_cpu_card import PN532CpuCardMixin
+
+        adapter = PN532Adapter()
+        # 验证类继承结构
+        self.assertIsInstance(adapter, PN532IdCardMixin)
+        self.assertIsInstance(adapter, PN532CpuCardMixin)
+
+        # 验证 SAM 显式常量定义
+        self.assertEqual(adapter.SAM_MODE_NORMAL, 0x01)
+        self.assertEqual(adapter.SAM_TIMEOUT_1S, 0x14)
+        self.assertEqual(adapter.SAM_USE_IRQ, 0x01)
+
+        # 验证由 Mixin 提供的公共方法均完整可访问
+        self.assertTrue(callable(getattr(adapter, "read_id_card_uid")))
+        self.assertTrue(callable(getattr(adapter, "restore_type_a_registers")))
+        self.assertTrue(callable(getattr(adapter, "send_apdu")))
+        self.assertTrue(callable(getattr(adapter, "read_cpu_card_public_info")))
+        self.assertTrue(callable(getattr(adapter, "scan_cpu_card_tree")))
+
+
+
+class Test20McpServiceSuite(unittest.TestCase):
+    """测试 MCP (Model Context Protocol) 架构、动态配置与异步工具链执行"""
+
+    def setUp(self):
+        import asyncio
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+
+    def tearDown(self):
+        self.loop.close()
+
+    def test_mcp_config_serialization(self):
+        """测试 McpServerConfig 的序列化、反序列化与功能分类判定"""
+        from mcp_server.config import McpServerConfig, McpFeatureCategory
+
+        cfg = McpServerConfig(
+            transport="sse",
+            host="0.0.0.0",
+            port=9090,
+            enabled_categories=["hardware", "m1"],
+            allow_block0_write=True
+        )
+        self.assertEqual(cfg.transport_mode, "sse")
+        self.assertEqual(cfg.host, "0.0.0.0")
+        self.assertEqual(cfg.port, 9090)
+        self.assertTrue(cfg.is_category_enabled(McpFeatureCategory.HARDWARE))
+        self.assertTrue(cfg.is_category_enabled(McpFeatureCategory.M1))
+        self.assertFalse(cfg.is_category_enabled(McpFeatureCategory.ID_CARD))
+        self.assertTrue(cfg.allow_block0_write)
+
+        data = cfg.to_dict()
+        cfg_loaded = McpServerConfig.from_dict(data)
+        self.assertEqual(cfg_loaded.transport_mode, "sse")
+        self.assertEqual(cfg_loaded.port, 9090)
+        self.assertEqual(len(cfg_loaded.enabled_categories), 2)
+
+    def test_mcp_server_initialization_and_tool_registration(self):
+        """测试全量创建 MCP 服务端时所有 35 个工具的中文描述与元数据完备性"""
+        from mcp_server.server import create_mcp_server
+        from mcp_server.config import McpServerConfig
+
+        cfg = McpServerConfig()
+        mcp, ctx = create_mcp_server(cfg)
+        try:
+            tools = self.loop.run_until_complete(mcp.list_tools())
+            self.assertGreaterEqual(len(tools), 35, f"预期注册至少 35 个工具，实际: {len(tools)}")
+
+            tool_names = {t.name for t in tools}
+            # 核心代表工具必须存在
+            expected_core_tools = [
+                "get_mcp_service_status",
+                "list_serial_ports",
+                "connect_reader",
+                "disconnect_reader",
+                "poll_card",
+                "convert_uid_formats",
+                "authenticate_sector",
+                "read_block",
+                "write_block",
+                "write_magic_block0",
+                "lock_ufuid_card",
+                "crack_card_keys",
+                "read_id_card",
+                "send_apdu",
+                "read_cpu_card_public_info",
+                "load_dump_file",
+                "save_dump_file",
+                "verify_and_repair_dump",
+                "compare_dumps",
+                "query_card_profile",
+                "upsert_card_profile",
+                "get_swipe_history",
+                "get_external_tools_status",
+            ]
+            for core_tool in expected_core_tools:
+                self.assertIn(core_tool, tool_names, f"缺少关键 MCP 工具: {core_tool}")
+
+            # 验证所有工具的描述均为中文且非空
+            for t in tools:
+                self.assertTrue(bool(t.description), f"工具 {t.name} 缺少描述说明")
+                # 简单验证中文包含 (至少有一个中文标点或字符)
+                has_chinese = any('\u4e00' <= char <= '\u9fff' for char in t.description)
+                self.assertTrue(has_chinese, f"工具 {t.name} 的描述必须为纯中文说明: {t.description}")
+        finally:
+            ctx.close()
+
+    def test_mcp_category_filtering(self):
+        """测试动态关闭某些功能分类时，对应工具集不予注册"""
+        from mcp_server.server import create_mcp_server
+        from mcp_server.config import McpServerConfig
+
+        # 仅启用 hardware 与 database
+        cfg = McpServerConfig(enabled_categories=["hardware", "database"])
+        mcp, ctx = create_mcp_server(cfg)
+        try:
+            tools = self.loop.run_until_complete(mcp.list_tools())
+            tool_names = {t.name for t in tools}
+
+            self.assertIn("list_serial_ports", tool_names)
+            self.assertIn("query_card_profile", tool_names)
+            self.assertNotIn("authenticate_sector", tool_names)
+            self.assertNotIn("read_id_card", tool_names)
+            self.assertNotIn("send_apdu", tool_names)
+        finally:
+            ctx.close()
+
+    def test_mcp_card_conversion_and_status_tools(self):
+        """测试纯算法与状态 MCP 工具的异步调度"""
+        from mcp_server.server import create_mcp_server
+        from mcp_server.config import McpServerConfig
+
+        cfg = McpServerConfig()
+        mcp, ctx = create_mcp_server(cfg)
+        try:
+            status = self.loop.run_until_complete(mcp.call_tool("get_mcp_service_status", {}))
+            self.assertIsNotNone(status)
+
+            # 测试 UID 转换工具
+            conv_res = self.loop.run_until_complete(
+                mcp.call_tool("convert_uid_formats", {"uid_hex": "D77EA0DF"})
+            )
+            self.assertIsNotNone(conv_res)
+        finally:
+            ctx.close()
+
+    def test_mcp_dump_tools_workflow(self):
+        """测试 Dump 管理相关的 MCP 工具工作流 (保存、载入、摘要、校验)"""
+        from mcp_server.server import create_mcp_server
+        from mcp_server.config import McpServerConfig
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dump_file = os.path.join(tmp_dir, "test_card.mct")
+
+            cfg = McpServerConfig()
+            mcp, ctx = create_mcp_server(cfg)
+            try:
+                # 预设内存 dump
+                ctx.current_dump.set_block(0, bytes.fromhex("11223344440804000102030405060708"))
+
+                # 1. 保存 dump
+                save_res = self.loop.run_until_complete(
+                    mcp.call_tool("save_dump_file", {"filepath": dump_file})
+                )
+                self.assertTrue(os.path.exists(dump_file))
+
+                # 2. 重新载入 dump
+                load_res = self.loop.run_until_complete(
+                    mcp.call_tool("load_dump_file", {"filepath": dump_file})
+                )
+                self.assertIsNotNone(load_res)
+
+                # 3. 校验并修复 dump
+                verify_res = self.loop.run_until_complete(
+                    mcp.call_tool("verify_and_repair_dump", {"repair": True})
+                )
+                self.assertIsNotNone(verify_res)
+
+                # 4. 获取摘要
+                summary_res = self.loop.run_until_complete(
+                    mcp.call_tool("get_dump_summary", {})
+                )
+                self.assertIsNotNone(summary_res)
+            finally:
+                ctx.close()
+
+
 def run_all_tests():
     print("\n" + "="*70)
     print("🚀 PyMifareTool 自动化集成测试套件启动")
@@ -2539,6 +3707,10 @@ def run_all_tests():
     suite.addTests(loader.loadTestsFromTestCase(Test14RemediationAnd4KFullSupport))
     suite.addTests(loader.loadTestsFromTestCase(Test15CpuCardEnhancements))
     suite.addTests(loader.loadTestsFromTestCase(Test16MagicCardCloneWizardAndAttackRunner))
+    suite.addTests(loader.loadTestsFromTestCase(Test17AnalysisReportFixes))
+    suite.addTests(loader.loadTestsFromTestCase(Test18CrackOptimizationAndCapabilities))
+    suite.addTests(loader.loadTestsFromTestCase(Test19CodeReviewReportImprovements))
+    suite.addTests(loader.loadTestsFromTestCase(Test20McpServiceSuite))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)

@@ -45,11 +45,17 @@ python -m pip install -r requirements.txt
 # 启动应用
 python main.py
 
-# 运行全量测试（当前基线：96 项通过，约 3 秒）
+# 运行全量测试（当前基线：145 项通过，约 2.9 秒）
 python tests/run_tests.py
 ```
 
 无头环境测试会自动使用 `QT_QPA_PLATFORM=offscreen`。
+
+# 启动对外 MCP 服务 (stdio 模式)
+python mcp_server.py
+
+# 启动对外 MCP 服务 (SSE 网络模式)
+python mcp_server.py --transport sse --host 0.0.0.0 --port 8000
 
 **不要**在未确认硬件连接的情况下运行 `tools/` 下的串口脚本；它们多数直接硬编码 COM 口。
 
@@ -79,21 +85,25 @@ PyMifareTool/
 │   │   ├── serial_transport.py # 串口，强制 DTR/RTS=False
 │   │   ├── ble_transport.py    # BLE，后台 asyncio + MTU 分片
 │   │   ├── ble_classifier.py   # BLE 设备分类
+│   │   ├── tcp_transport.py    # TCP / Modbus TCP
 │   │   └── factory.py          # TransportFactory
 │   ├── adapters/               # 硬件适配
 │   │   ├── base_adapter.py     # 统一读卡接口
-│   │   ├── pn532_adapter.py    # PCR532/PN532（核心，职责较多）
+│   │   ├── pn532_adapter.py    # PCR532/PN532（核心，组合 Mixin 瘦身）
+│   │   ├── pn532_id_card.py    # PN532IdCardMixin（二代身份证）
+│   │   ├── pn532_cpu_card.py   # PN532CpuCardMixin（CPU卡/APDU）
 │   │   ├── broadcaster_adapter.py
 │   │   ├── libnfc_adapter.py   # 外部 nfc-* 命令行工具
 │   │   ├── factory.py          # ReaderAdapterFactory / probe_device
 │   │   └── extensions/
-│   │       ├── pcsc_adapter.py # 目前是空壳
+│   │       ├── pcsc_adapter.py # PCSC/ACR122U（可选 pyscard）
 │   │       └── virtual_adapter.py
 │   ├── services/
 │   │   ├── serial_worker.py    # QThread 串口/BLE 轮询与独占
 │   │   ├── card_worker.py      # 读卡/破解/写卡/固件探测
 │   │   ├── key_manager.py      # 字典扫描、解析、合并
-│   │   └── attack_runner.py    # mfoc/mfcuk/hardnested/mfdetect
+│   │   ├── attack_runner.py    # mfoc/mfcuk/hardnested/mfdetect
+│   │   └── capability_probe.py # 设备能力与外部工具链探测
 │   ├── card_db.py              # SQLite 访问
 │   ├── protocol.py             # 兼容门面
 │   ├── dump_model.py           # 兼容门面
@@ -113,11 +123,13 @@ PyMifareTool/
 │   ├── crack_dialogs.py        # 扇区范围、手动密钥
 │   ├── card_manage.py          # 卡片档案、流水审计
 │   ├── key_select_dialog.py    # 字典勾选
+│   ├── device_capabilities_dialog.py # 连接后设备能力提示
 │   └── dump_diff.py            # Dump 差分
 │
 ├── keys/                       # 标准/酒店/扩展/共享字典，约 7.4 万条
-├── tests/run_tests.py          # 16 个测试类，96 项测试
-└── tools/                      # 开发期串口/协议调试脚本，不参与运行时
+├── tests/run_tests.py          # 19 个测试类，140 项测试
+├── tools/                      # 开发期串口/协议调试脚本，不参与运行时
+│   └── m1t/nfc-bin/            # M1T 的 mfoc/mfcuk/hardnested 工具链
 ```
 
 ---
@@ -159,7 +171,7 @@ CH340E/CP2102 的 DTR/RTS 可能直连主控复位端，拉高会导致设备假
 - 广播器（Broadcaster）是 **38400bps 单向 UID 广播**；
 - 正常业务链路不得向其发送认证、读写、寄存器配置等下行帧；
 - `BroadcasterAdapter` 的认证/读写为空实现，这是刻意设计；
-- 例外：`CardOperationWorker._do_probe_firmware()` 的广播器分支目前会主动发送探测帧，这是已知违规点，修复前不要扩大该行为。
+- 例外：`CardOperationWorker._do_probe_firmware()` 的广播器分支已改为纯被动模式，不发送任何下行探测帧；请继续保持该行为。
 
 ### 红线 3：射频/串口必须独占
 
@@ -270,7 +282,7 @@ read_cpu_card_once() -> dict
 scan_cpu_card_tree_once(...) -> dict
 ```
 
-关键信号：`sig_connected`、`sig_disconnected`、`sig_card_swiped`、`sig_card_removed`、`sig_raw_log`、`sig_device_identified`。
+关键信号：`sig_connected`、`sig_disconnected`、`sig_card_swiped`、`sig_card_removed`、`sig_raw_log`、`sig_device_identified`、`sig_device_capabilities`。
 
 ### `CardOperationWorker`
 
@@ -283,6 +295,17 @@ OP_READ_SECTOR = "read_sector"
 OP_WRITE_CARD  = "write_card"
 OP_PROBE_FIRMWARE = "probe_firmware"
 ```
+
+密钥恢复模式（`crack_mode`，默认 `fast`）：
+
+```python
+CRACK_MODE_FAST = "fast"   # 任一 Key 命中即停止该扇区
+CRACK_MODE_BOTH = "both"   # 同时恢复 Key A 与 Key B
+CRACK_MODE_A = "a"         # 仅恢复 Key A
+CRACK_MODE_B = "b"         # 仅恢复 Key B
+```
+
+阶段 3 使用 key-major 跨扇区扫描；认证失败后的 `reactivate_target()` 结果会被 `_last_reactivate_ok` 复用，避免额外发送 `is_card_present` 查询。
 
 信号：`sig_progress`、`sig_log`、`sig_sector_cracked`、`sig_block_read`、`sig_block_failed`、`sig_finished`。
 
@@ -312,6 +335,7 @@ save_to_file() / load_from_file()
 ```python
 record_swipe(uid, conv_info, raw_hex)
 update_card_info(uid, name, holder, note)
+upsert_card(uid, card_name=..., card_holder=..., card_type=..., note=..., conv_info=None)
 get_card(uid)
 list_all_cards()
 list_recent_logs(limit=100)
@@ -321,7 +345,7 @@ clear_swipe_logs()
 close()
 ```
 
-注意：**没有** `upsert_card()`；表结构也没有 `department/phone/remark`。
+注意：表结构没有 `department/phone/remark`；归档请使用 `upsert_card()` 的 schema 对齐字段。
 
 ### `KeyManager`
 
@@ -330,9 +354,10 @@ get_keys_dir()
 list_available_files()
 parse_key_file(path)
 load_combined_keys(selected_files=None, include_defaults_fallback=True)
+save_custom_keys(keys)
 ```
 
-注意：**没有** `save_custom_keys()`。
+注意：`CUSTOM_KEYS_FILE` 是 `core/services/key_manager.py` 的模块级常量，不是 `KeyManager` 类属性。
 
 ### `ReaderAdapterFactory`
 
@@ -342,7 +367,19 @@ ReaderAdapterFactory.probe_device(ser, preferred="auto")
 ReaderAdapterFactory.register_adapter(name, cls)
 ```
 
-UI 可选设备：`auto / pn532 / broadcaster / virtual`。
+UI 可选设备：`auto / pn532 / broadcaster / virtual / libnfc`。
+
+### 设备能力探测
+
+```python
+adapter.get_capabilities() -> dict
+build_device_capabilities(adapter, connection="serial", port="COM3", baudrate=115200) -> dict
+```
+
+- `features` 状态：`supported` / `needs_card` / `external` / `experimental` / `unsupported`；
+- `tools` 检测 `tools/m1t/nfc-bin` 下的 mfoc/mfcuk/libnfc_hardnested 等文件；
+- 不启动外部进程、不发送破坏性指令；
+- `SerialWorker` 在 `sig_device_identified` 后发出 `sig_device_capabilities`，主窗口自动弹出能力窗并可用 QSettings 关闭自动提示。
 
 ---
 
@@ -438,17 +475,18 @@ python tests/run_tests.py
 
 当前基线：
 
-- **96 项测试全部通过**
-- 约 **3 秒**
-- 覆盖协议、Dump、数据库、GUI 无头渲染、PN532、字典、二代证、BLE、CPU 卡、4K、魔术卡/克隆/攻击器。
+- **140 项测试通过，0 项跳过（本机 COM3 可用）**
+- 约 **2.4 秒**
+- 覆盖协议、Dump、数据库、GUI 无头渲染、PN532、字典、二代证、BLE、CPU 卡、4K、魔术卡/克隆/攻击器、TCP/Modbus、PCSC 降级、破解模式、能力探测、M1T 工具链与外部工具 GBK/UTF-8 输出解码。
 
 但请注意测试盲区：
 
-- 克隆向导只测界面和步骤，不执行真实读写；
-- 魔术卡工厂清卡未执行；
-- 字典导入/保存未执行；
-- 固件探测测试 mock 了 `get_firmware_version`；
-- 移卡中止测试 mock 了 `is_card_present`。
+- 克隆向导已验证 1K/4K 参数与界面，但未执行真实读写；
+- 魔术卡工厂清卡未在真实魔术卡上执行；
+- 字典保存已覆盖文件合并/缓存，但未覆盖真实 UI 全流程；
+- 固件探测与在位检测仍以 mock 串口为主；
+- PCSC/TCP/广播器路径未做真实硬件联调；
+- `tools/m1t/nfc-bin` 的 libnfc/mfoc/mfcuk/hardnested 未在 PCR532 真机上完成 COM 口联调。
 
 因此，**测试全绿不代表所有 GUI/硬件路径可用**。修改相关模块后，必须补充真实路径测试。
 
@@ -491,7 +529,10 @@ python tests/run_tests.py
 1. 继承 `core/services/attack_runner.py` 的 `BaseAttackEngine`；
 2. 实现 `is_available()`、`start_attack()`、`cancel()`；
 3. 用 `QProcess` 启动外部工具，解析进度与密钥；
-4. 在 UI 的外部攻击页注册。
+4. 在 UI 的外部攻击页注册；
+5. 外部工具必须独占 COM 口，启动前检查 `SerialWorker.is_connected()` / `isRunning()`；
+6. 通过 `AttackRunner.set_device_context()` 传入端口/波特率/连接方式，启动时自动注入 `NFC_DEVICE` 与工作目录；
+7. 输出路径必须转为绝对路径，避免切换 cwd 后写错位置。
 
 ### 新增 UI 工具页
 
@@ -501,15 +542,18 @@ python tests/run_tests.py
 4. 增加 offscreen 渲染测试；
 5. 耗时逻辑放入 Worker，不要阻塞主线程。
 
-### 待补全的扩展点
+### 已完成/待上机验证的扩展点
 
-- PCSC/ACR122U：补全 `PCSCReaderAdapter`；
-- libnfc：把 `LibnfcCliAdapter` 加入 UI；
-- TCP/Modbus：实现 `ITransport`；
-- 虚拟卡：补权限位与认证状态；
-- 克隆向导：修复现有接口不一致并支持 4K；
-- 魔术卡：修正密钥读取方式并完善工厂清卡；
-- 字典：增加缓存与增量统计。
+- PCSC/ACR122U：已实现 `PCSCReaderAdapter`，需安装 `pyscard` 并真机验证；
+- libnfc：已加入 UI 设备选项，需真机验证；
+- TCP/Modbus：已实现 `TcpTransport`/`ModbusTcpTransport`，需实际设备协议联调；
+- 虚拟卡：已校验认证状态与 Access Bits；
+- 克隆向导：已支持 1K/4K，需真机验证整卡克隆；
+- 魔术卡：已修正密钥读取，工厂清卡需真机验证；
+- 字典：已增加解析缓存与选键增量统计；
+- 设备能力：已实现适配器 `get_capabilities()`、`core/services/capability_probe.py` 与连接后自动提示窗；
+- M1T 工具链：已将 mfoc/mfcuk/mfdetect/libnfc_hardnested/nfc-list 等复制到 `tools/m1t/nfc-bin`，外部工具需先断开 COM 口；
+- Crypto1/hardnested：标准 PN532 HSU 不暴露 nonce，是否可用于 PCR532 需真机验证，UI 中标记为外部/实验性。
 
 ---
 
@@ -554,18 +598,17 @@ card_keys(uid, sector, key_a, key_b, updated_at,
 
 ---
 
-## 14. UART MCP（调试串口时）
+## 14. MCP 服务支持 (Model Context Protocol)
 
-项目已接入 `uart-mcp`，涉及 COM 口操作时优先使用 MCP 工具：
+项目内置原生全功能 MCP 对外服务（基于官方 `mcp>=1.3.0,<2.0` / `FastMCP`）：
 
-- `list_ports` / `open_port` / `send_data` / `read_data` / `create_session`。
-
-注意：
-
-- uart-mcp 直接打开串口，绕过 `SerialWorker` 的独占与 DTR/RTS 保护；
-- 不要与 `main.py` 同时占用同一 COM 口；
-- 调试广播器时只读不发；
-- 依赖 `mcp<2`，安装命令见项目环境配置。
+- **入口**：`mcp_server.py`
+- **配置**：`mcp_server_config.json`
+- **架构**：全异步实现，底层物理 I/O 受 `asyncio.Lock` 保护并严格遵守 DTR/RTS 禁用与 Block 0 防写红线；
+- **全量工具**：对外提供 35 个纯中文描述 MCP Tools，覆盖硬件管理、寻卡、M1 认证读写、魔术卡、密码破解、二代证、CPU 卡/APDU、Dump 导出校验、数据库档案及外部工具链；
+- **传输模式**：支持 `stdio` 与 `sse`；
+- **配置裁剪**：可通过 `enabled_categories` 动态裁剪激活的工具分类，不在白名单的工具不予注册；
+- **Skill 规范**：详细规范见 `.agents/skills/pymifare-mcp/SKILL.md`，文档见 `docs/MCP_SERVICE_GUIDE.md`。
 
 ---
 
@@ -588,4 +631,4 @@ card_keys(uid, sector, key_a, key_b, updated_at,
 
 ---
 
-**最后更新依据**：基于当前工作区源码的全量静态分析；测试基线 96 项通过。若代码已变化，请以实际源码为准并更新本文件。
+**最后更新依据**：基于当前工作区源码的全量静态分析；测试基线 140 项通过（本机 COM3 可用）。若代码已变化，请以实际源码为准并更新本文件。
