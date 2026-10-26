@@ -26,10 +26,11 @@ class CloneWizardDialog(QDialog):
 
     sig_card_cloned = pyqtSignal(MifareDump)
 
-    def __init__(self, serial_worker, card_db=None, parent=None):
+    def __init__(self, serial_worker, card_db=None, parent=None, is_4k: bool = False):
         super().__init__(parent)
         self.worker = serial_worker
         self.card_db = card_db
+        self.is_4k = bool(is_4k)
         self.source_dump: Optional[MifareDump] = None
         self.target_dump: Optional[MifareDump] = None
         self.card_op_worker: Optional[CardOperationWorker] = None
@@ -158,6 +159,19 @@ class CloneWizardDialog(QDialog):
         self.lbl_source_stats = QLabel("读取状态: 未开始")
         self.lbl_source_stats.setStyleSheet("color: #64748B; font-size: 11px;")
         ic_lay.addWidget(self.lbl_source_stats)
+
+        h_spec = QHBoxLayout()
+        h_spec.addWidget(QLabel("卡片规格:"))
+        self.cmb_card_spec = QComboBox()
+        self.cmb_card_spec.addItems([
+            "Mifare Classic 1K (16 扇区 / 64 块)",
+            "Mifare Classic 4K (40 扇区 / 256 块)",
+        ])
+        self.cmb_card_spec.setCurrentIndex(1 if self.is_4k else 0)
+        self.cmb_card_spec.setStyleSheet("color: #E2E8F0;")
+        self.cmb_card_spec.currentIndexChanged.connect(self._on_card_spec_changed)
+        h_spec.addWidget(self.cmb_card_spec, stretch=1)
+        ic_lay.addLayout(h_spec)
 
         lay.addWidget(info_card)
 
@@ -332,6 +346,17 @@ class CloneWizardDialog(QDialog):
             self.stack.setCurrentIndex(curr - 1)
             self._update_step_ui()
 
+    def _on_card_spec_changed(self, index: int):
+        new_is_4k = index == 1
+        if new_is_4k == self.is_4k:
+            return
+        self.is_4k = new_is_4k
+        self.source_dump = None
+        self.target_dump = None
+        self.lbl_source_uid.setText("原卡 UID: 等待读取...")
+        self.lbl_source_stats.setText("读取状态: 未开始")
+        self.btn_next.setEnabled(False)
+
     # ─────────────────────────────────────────────────────────────
     # 原卡读取
     # ─────────────────────────────────────────────────────────────
@@ -346,9 +371,9 @@ class CloneWizardDialog(QDialog):
 
         self.card_op_worker = CardOperationWorker(
             worker=self.worker,
-            op_type="read",
-            target_sectors=list(range(16)),
-            is_4k=False,
+            op_type=CardOperationWorker.OP_READ_CARD,
+            target_sectors=list(range(40 if self.is_4k else 16)),
+            is_4k=self.is_4k,
             concurrency=4,
             parent=self
         )
@@ -364,11 +389,20 @@ class CloneWizardDialog(QDialog):
         self.btn_start_read.setEnabled(True)
         if success and isinstance(result_dump, MifareDump):
             self.source_dump = result_dump
+            self.is_4k = bool(result_dump.is_4k)
+            self.cmb_card_spec.blockSignals(True)
+            self.cmb_card_spec.setCurrentIndex(1 if self.is_4k else 0)
+            self.cmb_card_spec.blockSignals(False)
             uid = result_dump.get_uid()
             uid_str = " ".join(f"{b:02X}" for b in uid)
             self.lbl_source_uid.setText(f"原卡 UID: {uid_str}")
-            readable_blocks = sum(1 for b in range(64) if result_dump.get_block_state(b) == BlockState.READ_OK)
-            self.lbl_source_stats.setText(f"读取状态: ✅ 读取完成！成功读取 {readable_blocks}/64 块")
+            total_blocks = result_dump.block_count
+            readable_blocks = sum(
+                1 for b in range(total_blocks)
+                if result_dump.get_block_state(b) == BlockState.READ_OK
+            )
+            self.lbl_source_stats.setText(
+                f"读取状态: ✅ 读取完成！成功读取 {readable_blocks}/{total_blocks} 块")
             self.lbl_status.setText("原卡读取成功！请点击“下一步”放置目标魔术卡。")
             self.btn_next.setEnabled(True)
         else:
@@ -405,14 +439,15 @@ class CloneWizardDialog(QDialog):
         self.progress_bar.setValue(0)
         self.lbl_status.setText(f"正在向目标魔术卡克隆写入数据 (模式: {magic_type})...")
 
+        source_is_4k = bool(self.source_dump.is_4k)
         self.card_op_worker = CardOperationWorker(
             worker=self.worker,
-            op_type="write",
-            target_sectors=list(range(16)),
+            op_type=CardOperationWorker.OP_WRITE_CARD,
+            target_sectors=list(range(40 if source_is_4k else 16)),
             dump_to_write=self.source_dump,
             allow_block0_write=allow_b0,
             magic_type=magic_type,
-            is_4k=False,
+            is_4k=source_is_4k,
             parent=self
         )
         self.card_op_worker.sig_progress.connect(self._on_write_progress)
@@ -440,11 +475,14 @@ class CloneWizardDialog(QDialog):
         src_uid = " ".join(f"{b:02X}" for b in self.source_dump.get_uid())
         ci = self.worker.poll_card_once(timeout=0.3) if (self.worker and hasattr(self.worker, "poll_card_once")) else None
         tgt_uid = " ".join(f"{b:02X}" for b in ci["uid_bytes"]) if (ci and "uid_bytes" in ci) else src_uid
+        spec = "Mifare Classic 4K (S70)" if self.source_dump.is_4k else "Mifare Classic 1K (S50)"
+        capacity = (f"{self.source_dump.sector_count} 扇区 "
+                    f"({self.source_dump.block_count} 块)")
 
         rows = [
             ("物理 UID", src_uid, tgt_uid),
-            ("卡片规格", "Mifare Classic 1K (S50)", "Mifare Classic 1K (S50)"),
-            ("总扇区数", "16 扇区 (64 块)", "16 扇区 (64 块)"),
+            ("卡片规格", spec, spec),
+            ("总扇区数", capacity, capacity),
             ("数据一致性", "原卡基准", "100% 完全匹配"),
             ("Block 0 改写", "厂商原厂", "已克隆同步"),
         ]
@@ -461,7 +499,7 @@ class CloneWizardDialog(QDialog):
         f, _ = QFileDialog.getSaveFileName(self, "导出克隆卡 Dump 文件", "clone_dump.dump", "Mifare Dump (*.dump *.bin);;MCT 文本 (*.mct)")
         if f:
             if f.endswith(".mct"):
-                self.source_dump.export_to_mct_file(f)
+                self.source_dump.save_mct(f)
             else:
                 self.source_dump.save_to_file(f)
             QMessageBox.information(self, "成功", f"Dump 文件已成功保存至:\n{f}")
@@ -473,13 +511,14 @@ class CloneWizardDialog(QDialog):
         uid = self.source_dump.get_uid()
         uid_hex = " ".join(f"{b:02X}" for b in uid)
         conv = CardConverter.convert_uid(uid)
+        card_type = ("Mifare Classic 4K (克隆卡)"
+                     if self.source_dump.is_4k else "Mifare Classic 1K (克隆卡)")
         self.card_db.upsert_card(
             uid=uid_hex,
-            card_type="Mifare Classic 1K (克隆卡)",
-            holder="一键克隆副本",
-            department="克隆归档",
-            phone="",
-            remark="由一键复制向导自动生成",
-            conversions=conv
+            card_name="一键克隆副本",
+            card_holder="克隆归档",
+            card_type=card_type,
+            note="由一键复制向导自动生成",
+            conv_info=conv
         )
         QMessageBox.information(self, "成功", f"卡片 UID [{uid_hex}] 已成功录入本地卡片档案库！")

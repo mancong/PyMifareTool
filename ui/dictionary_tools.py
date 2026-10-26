@@ -3,6 +3,8 @@
 PyMifareTool - 密码字典库 / Access Bits 完整解析器 / 卡号换算器 / 指令调试终端
 """
 
+import os
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QTextEdit, QGroupBox, QGridLayout, QComboBox, QTabWidget, QPlainTextEdit,
@@ -14,6 +16,9 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from core.protocol import AccessBitsDecoder, AccessBitsEncoder
 from core.key_manager import KeyManager
 from core.services.attack_runner import AttackRunner
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DEFAULT_NFC_BIN = os.path.join(_PROJECT_ROOT, "tools", "m1t", "nfc-bin")
 
 # 经典行业高频默认密钥字典 (门禁、梯控、一卡通、水控机)
 COMMON_KEYS = [
@@ -66,9 +71,10 @@ class DictionaryToolsWidget(QWidget):
     # 恢复出密码信号 (sector, key_type, key_hex)
     sig_key_recovered = pyqtSignal(int, str, str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, serial_worker=None):
         super().__init__(parent)
-        self.attack_runner = AttackRunner(bin_dir="nfc-bin", parent=self)
+        self.serial_worker = serial_worker
+        self.attack_runner = AttackRunner(bin_dir=_DEFAULT_NFC_BIN, parent=self)
         self._init_ui()
 
     def _init_ui(self):
@@ -94,7 +100,7 @@ class DictionaryToolsWidget(QWidget):
         tabs.setTabToolTip(1, "正序/倒序/8H10D/WG26/WG34 卡号多标准换算")
         tabs.setTabToolTip(2, "M1 卡常见默认行业高频密钥库")
         tabs.setTabToolTip(3, "底盘原生 Hex 指令收发与调试")
-        tabs.setTabToolTip(4, "Darkside (mfcuk) / Nested (mfoc) / Hardnested (crypto1_bs) 外部工具链联动破解")
+        tabs.setTabToolTip(4, "Darkside (mfcuk) / Nested (mfoc) / Hardnested (libnfc/crypto1_bs) 外部工具链联动破解")
 
         layout.addWidget(tabs)
 
@@ -586,7 +592,7 @@ class DictionaryToolsWidget(QWidget):
         layout.setSpacing(8)
 
         # 1. 外部工具链状态检测栏
-        env_box = QGroupBox("🛠️ 外部工具链环境 (nfc-bin)")
+        env_box = QGroupBox("🛠️ 外部工具链环境 (tools/m1t/nfc-bin)")
         env_lay = QVBoxLayout(env_box)
         env_lay.setContentsMargins(8, 6, 8, 6)
         env_lay.setSpacing(4)
@@ -609,6 +615,12 @@ class DictionaryToolsWidget(QWidget):
         self.lbl_tool_status.setFont(QFont("Consolas", 10))
         self.lbl_tool_status.setStyleSheet("color: #94A3B8; padding: 2px 4px;")
         env_lay.addWidget(self.lbl_tool_status)
+
+        self.lbl_driver_hint = QLabel("")
+        self.lbl_driver_hint.setFont(QFont("Microsoft YaHei", 9))
+        self.lbl_driver_hint.setWordWrap(True)
+        self.lbl_driver_hint.setStyleSheet("color: #FBBF24; padding: 2px 4px;")
+        env_lay.addWidget(self.lbl_driver_hint)
         layout.addWidget(env_box)
 
         # 2. 攻击模式与参数配置
@@ -790,10 +802,17 @@ class DictionaryToolsWidget(QWidget):
         html = "  |  ".join([
             badge(st["mfoc"], "mfoc.exe"),
             badge(st["mfcuk"], "mfcuk.exe"),
-            badge(st["crypto1_bs"], "crypto1_bs.exe"),
+            badge(st["libnfc_hardnested"], "libnfc_hardnested.exe"),
             badge(st["mfdetect"], "mfdetect.exe"),
+            badge(st["nfc_list"], "nfc-list.exe"),
+            badge(st["libnfc_dll"], "libnfc.dll"),
         ])
         self.lbl_tool_status.setText(f"<html>{html}</html>")
+
+        driver = self.attack_runner.check_libnfc_driver()
+        hint = str(driver.get("hint", ""))
+        color = "#34D399" if driver.get("is_pn532") else "#FBBF24"
+        self.lbl_driver_hint.setText(f"<span style='color:{color};'>驱动: {hint}</span>")
 
     def _on_attack_type_changed(self, idx: int):
         # 0: MFOC, 1: MFCUK, 2: Hardnested, 3: MFDetect
@@ -815,6 +834,40 @@ class DictionaryToolsWidget(QWidget):
         idx = self.cmb_attack_type.currentIndex()
         out_dump = self.txt_attack_dump.text().strip() or "dump.mfd"
 
+        if self.serial_worker is not None:
+            connected = False
+            running = False
+            try:
+                connected = bool(self.serial_worker.is_connected())
+            except Exception:
+                connected = False
+            try:
+                running = bool(self.serial_worker.isRunning())
+            except Exception:
+                running = False
+            if connected or running:
+                QMessageBox.warning(
+                    self,
+                    "串口被占用",
+                    "外部工具需要独占串口，当前读卡器仍被 PyMifareTool 占用。\n\n"
+                    "请先在主窗口点击【断开连接】，等待状态变为“已断开”后再启动外部攻击。",
+                )
+                return
+
+            port = getattr(self.serial_worker, "port", "")
+            baud = getattr(self.serial_worker, "baudrate", 115200)
+            conn = getattr(self.serial_worker, "conn_type", "serial")
+            if str(conn).lower() == "ble":
+                QMessageBox.warning(
+                    self,
+                    "不支持 BLE 外部工具",
+                    "libnfc/mfoc 只能通过串口访问 PN532，无法使用 BLE 连接。\n\n"
+                    "请改用 USB 串口连接读卡器后再启动外部攻击。",
+                )
+                return
+            self.attack_runner.set_device_context(port=port, baudrate=baud, connection=conn)
+
+        self._refresh_tool_status()
         self.btn_run_attack.setEnabled(False)
         self.btn_stop_attack.setEnabled(True)
         self.attack_prog_bar.setValue(0)
@@ -858,7 +911,6 @@ class DictionaryToolsWidget(QWidget):
 
     def _on_load_attack_dump(self):
         dump_p = self.txt_attack_dump.text().strip()
-        import os
         if not os.path.exists(dump_p):
             QMessageBox.warning(self, "提示", f"未找到 Dump 文件: {dump_p}，请确认任务是否已成功完成并生成了文件。")
             return
@@ -870,11 +922,18 @@ class DictionaryToolsWidget(QWidget):
         if rows == 0:
             QMessageBox.information(self, "提示", "当前没有捕获到任何密钥。")
             return
-        cnt = 0
+        keys = []
         for r in range(rows):
-            k_hex = self.tbl_recovered_keys.item(r, 2).text().strip()
+            item = self.tbl_recovered_keys.item(r, 2)
+            k_hex = item.text().strip() if item else ""
             if len(k_hex) == 12:
-                KeyManager.save_custom_keys([k_hex])
-                cnt += 1
-        self._load_custom_keys()
-        QMessageBox.information(self, "成功", f"已将 {cnt} 个密钥导入并保存至密码字典库！")
+                keys.append(k_hex)
+        if not keys:
+            QMessageBox.information(self, "提示", "当前捕获的密钥格式均无效。")
+            return
+        total = KeyManager.save_custom_keys(keys)
+        self._dict_refresh_files()
+        QMessageBox.information(
+            self, "成功",
+            f"已将 {len(keys)} 个密钥合并保存至密码字典库 (custom.keys 共 {total} 条)！"
+        )

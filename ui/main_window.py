@@ -9,6 +9,7 @@ PyMifareTool - 主窗口界面与现代化暗黑科技风格仪表盘 (Pro 增�
 - 报文日志双向联动与底层指令发送
 """
 
+import os
 import sys
 import datetime
 from PyQt6.QtWidgets import (
@@ -19,7 +20,7 @@ from PyQt6.QtWidgets import (
     QTabBar, QStylePainter, QStyleOptionTab, QStyle
 )
 from PyQt6.QtGui import QFont, QColor, QIcon
-from PyQt6.QtCore import Qt, pyqtSlot, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSlot, QTimer, QThread, pyqtSignal, QSettings
 import serial.tools.list_ports
 
 from core.serial_worker import SerialWorker
@@ -30,6 +31,7 @@ from ui.dump_diff import DumpDiffWidget
 from ui.card_manage import CardManageWidget
 from ui.dictionary_tools import DictionaryToolsWidget
 from ui.cpu_card_widget import CpuCardWidget
+from ui.device_capabilities_dialog import DeviceCapabilitiesDialog
 
 DARK_STYLESHEET = """
 QMainWindow, QWidget {
@@ -344,6 +346,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("PyMifareTool - 智能 Mifare Classic 管理套件 (Pro)")
         self.setStyleSheet(DARK_STYLESHEET)
 
+        # 设置应用程序与窗口图标
+        icon_path = os.path.join(os.path.dirname(__file__), "resources", "app_icon.png")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
         # 屏幕分辨率自适应初始尺寸与安全最小尺寸 (防止小屏幕展示不全)
         self.setMinimumSize(880, 520)
         screen = QApplication.primaryScreen()
@@ -367,6 +374,8 @@ class MainWindow(QMainWindow):
         self.current_uid = ""
         self._last_selected_ble_addr = ""
         self._ble_discovered_map = {}
+        self.settings = QSettings("PyMifareTool", "PyMifareTool")
+        self._last_capabilities = None
 
         self._init_ui()
         self._init_signals()
@@ -542,6 +551,13 @@ class MainWindow(QMainWindow):
         auto_h.addWidget(self.spin_poll_interval)
         lay_conn.addLayout(auto_h, 7, 0, 1, 2)
 
+        self.btn_device_caps = QPushButton("🧪 查看设备能力与工具链")
+        self.btn_device_caps.setToolTip("查看当前读卡器支持的卡片类型、协议功能与外部 Crypto1 工具链状态")
+        self.btn_device_caps.setStyleSheet("padding: 4px; font-size: 11px;")
+        self.btn_device_caps.setEnabled(False)
+        self.btn_device_caps.clicked.connect(lambda: self._open_capabilities_dialog(auto=False))
+        lay_conn.addWidget(self.btn_device_caps, 8, 0, 1, 2)
+
         left_layout.addWidget(grp_conn)
 
         # 2. 实时感应卡片看板 (核心视觉焦点，高度紧凑)
@@ -636,7 +652,7 @@ class MainWindow(QMainWindow):
 
         self.tab_diff = DumpDiffWidget()
         self.tab_manage = CardManageWidget(self.db)
-        self.tab_tools = DictionaryToolsWidget()
+        self.tab_tools = DictionaryToolsWidget(serial_worker=self.worker)
         self.tab_sector = SectorTableWidget(serial_worker=self.worker)
         self.tab_sector.set_database(self.db)
         self.tab_cpu = CpuCardWidget(serial_worker=self.worker)
@@ -790,6 +806,7 @@ class MainWindow(QMainWindow):
         self.worker.sig_card_swiped.connect(self._on_card_swiped)
         self.worker.sig_card_removed.connect(self._on_card_removed)
         self.worker.sig_device_identified.connect(self._on_device_identified)
+        self.worker.sig_device_capabilities.connect(self._on_device_capabilities)
         self.worker.sig_raw_log.connect(self._on_raw_log)
         self.worker.sig_status.connect(lambda msg: self.status_bar.showMessage(msg))
 
@@ -1069,6 +1086,30 @@ class MainWindow(QMainWindow):
         self.lbl_status_led.setText(f"● 已识别: {dev_name}")
         self.lbl_status_led.setStyleSheet("color: #10B981; font-weight: bold; font-size: 11px;")
         self.status_bar.showMessage(f"🎯 读卡器已就绪: {dev_name} | 固件/协议: {fw_ver}")
+
+    @pyqtSlot(dict)
+    def _on_device_capabilities(self, capabilities: dict):
+        self._last_capabilities = capabilities
+        self.btn_device_caps.setEnabled(True)
+        features = capabilities.get("features", [])
+        supported = sum(1 for f in features if f.get("status") in ("supported", "needs_card"))
+        experimental = sum(1 for f in features if f.get("status") in ("external", "experimental"))
+        self.btn_device_caps.setToolTip(
+            f"设备: {capabilities.get('device_name', '未知')}\n"
+            f"固件: {capabilities.get('firmware_info', '未知')}\n"
+            f"可用功能: {supported} 项，外部/实验性: {experimental} 项"
+        )
+        auto_show = self.settings.value("ui/show_device_capabilities", True, type=bool)
+        if auto_show:
+            self._open_capabilities_dialog(auto=True)
+
+    def _open_capabilities_dialog(self, auto: bool = False):
+        if not self._last_capabilities:
+            QMessageBox.information(self, "设备能力", "尚未连接读卡器，暂无设备能力信息。")
+            return
+        dialog = DeviceCapabilitiesDialog(self._last_capabilities, self)
+        dialog.exec()
+        self.settings.setValue("ui/show_device_capabilities", dialog.should_show_next_time())
 
     @pyqtSlot()
     def _on_card_removed(self):

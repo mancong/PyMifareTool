@@ -564,8 +564,9 @@ class MagicCardDialog(QDialog):
 
         known_keys = {}
         if self.current_dump:
-            for s in range(40 if self.current_dump.is_4k else 16):
-                ka = self.current_dump.get_key_a(s)
+            for s in range(self.current_dump.sector_count):
+                info = self.current_dump.get_sector_info(s)
+                ka = info.get("key_a") if info else None
                 if ka and ka != b"\x00" * 6:
                     known_keys[s] = ka
 

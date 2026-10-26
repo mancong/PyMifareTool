@@ -16,6 +16,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
 from core.dump_model import MifareDump, BlockState
+from core.services.card_worker import CardOperationWorker
 
 
 _TABLE_QSS = (
@@ -73,6 +74,36 @@ class SectorScopeDialog(QDialog):
         self.table.itemChanged.connect(self._on_item_changed)
         lay.addWidget(self.table, 1)
 
+        mode_h = QHBoxLayout()
+        mode_h.setSpacing(8)
+        mode_lbl = QLabel("密钥恢复模式:")
+        mode_lbl.setStyleSheet("color: #CBD5E1; font-size: 11px;")
+        self.cmb_crack_mode = QComboBox()
+        self.cmb_crack_mode.setMinimumWidth(260)
+        self.cmb_crack_mode.addItem(
+            "快速模式：任一 Key 命中即停止（推荐）",
+            CardOperationWorker.CRACK_MODE_FAST,
+        )
+        self.cmb_crack_mode.addItem(
+            "完整模式：同时恢复 Key A 与 Key B",
+            CardOperationWorker.CRACK_MODE_BOTH,
+        )
+        self.cmb_crack_mode.addItem(
+            "仅恢复 Key A",
+            CardOperationWorker.CRACK_MODE_A,
+        )
+        self.cmb_crack_mode.addItem(
+            "仅恢复 Key B",
+            CardOperationWorker.CRACK_MODE_B,
+        )
+        self.cmb_crack_mode.setToolTip(
+            "快速模式只需恢复一把可用密钥即可读取扇区，耗时约减半；"
+            "完整模式会继续寻找另一把密钥。"
+        )
+        mode_h.addWidget(mode_lbl)
+        mode_h.addWidget(self.cmb_crack_mode, 1)
+        lay.addLayout(mode_h)
+
         self.lbl_summary = QLabel("")
         self.lbl_summary.setStyleSheet("color: #7DD3FC; font-size: 11px;")
         lay.addWidget(self.lbl_summary)
@@ -106,14 +137,15 @@ class SectorScopeDialog(QDialog):
         lay.addLayout(foot)
 
     def _sector_status(self, sector: int):
-        first = sector * 4
-        states = [self.dump.get_block_state(b) for b in range(first, first + 4)]
+        first = self.dump.get_sector_first_block(sector)
+        count = self.dump.get_sector_block_count(sector)
+        states = [self.dump.get_block_state(b) for b in range(first, first + count)]
         ok = sum(1 for s in states if s == BlockState.READ_OK)
-        if ok == 4:
+        if ok == count:
             return "已解密可读", "#10B981", True
         if ok == 0:
             return "加密/未读取", "#F59E0B", False
-        return f"部分可读 ({ok}/4)", "#FBBF24", False
+        return f"部分可读 ({ok}/{count})", "#FBBF24", False
 
     def _populate(self):
         self.table.setRowCount(0)
@@ -123,8 +155,9 @@ class SectorScopeDialog(QDialog):
         self.table.setRowCount(sector_count)
         for sector in range(sector_count):
             text, color, readable = self._sector_status(sector)
-            first = sector * 4
-            block_range = f"{first}-{first + 3}"
+            first = self.dump.get_sector_first_block(sector)
+            count = self.dump.get_sector_block_count(sector)
+            block_range = f"{first}-{first + count - 1}"
             self._row_sector.append(sector)
             self._default_checked.append(not readable)
             self._make_item(sector, 1, f"S{sector:02d}", "#38BDF8")
@@ -177,6 +210,10 @@ class SectorScopeDialog(QDialog):
             if it and it.checkState() == Qt.CheckState.Checked:
                 result.append(self._row_sector[r])
         return result
+
+    def get_crack_mode(self) -> str:
+        data = self.cmb_crack_mode.currentData()
+        return str(data) if data else CardOperationWorker.CRACK_MODE_FAST
 
     def _on_accept(self):
         if not self.get_selected_sectors():

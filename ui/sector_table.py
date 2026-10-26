@@ -613,7 +613,8 @@ class SectorTableWidget(QWidget):
     # 异步卡片交互工作流
     # -------------------------------------------------------------
     def _start_worker(self, op_type: str, dump_to_write=None, allow_b0=False, custom_keys=None,
-                      concurrency=1, target_sectors=None, manual_key=None, magic_type="CUID", is_4k=None):
+                      concurrency=1, target_sectors=None, manual_key=None, magic_type="CUID", is_4k=None,
+                      crack_mode="fast"):
         if not self.serial_worker or not self.serial_worker.is_connected():
             QMessageBox.warning(self, "未连接", "请先在左侧连接读卡器串口！")
             return
@@ -639,7 +640,8 @@ class SectorTableWidget(QWidget):
             manual_key=manual_key,
             magic_type=magic_type,
             is_4k=is_4k_effective,
-            parent=self
+            parent=self,
+            crack_mode=crack_mode
         )
         self.card_op_worker.sig_progress.connect(self._on_worker_progress)
         self.card_op_worker.sig_log.connect(lambda msg: self.sig_notify.emit(msg))
@@ -806,7 +808,8 @@ class SectorTableWidget(QWidget):
             custom_keys=self._selected_keys,
             concurrency=self._concurrency,
             target_sectors=target_sectors,
-            is_4k=is_4k
+            is_4k=is_4k,
+            crack_mode=scope.get_crack_mode()
         )
 
     def _on_manual_decrypt(self, block_idx: int):
@@ -852,7 +855,12 @@ class SectorTableWidget(QWidget):
 
     def _on_open_clone_wizard(self):
         from ui.clone_wizard_dialog import CloneWizardDialog
-        dlg = CloneWizardDialog(self.serial_worker, card_db=self.card_db, parent=self)
+        dlg = CloneWizardDialog(
+            self.serial_worker,
+            card_db=self.db,
+            parent=self,
+            is_4k=bool(getattr(self.dump, "is_4k", False)),
+        )
         dlg.sig_card_cloned.connect(self._on_card_cloned)
         dlg.exec()
 

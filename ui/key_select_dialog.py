@@ -6,7 +6,8 @@ PyMifareTool - 密钥字典文件选择与扫描模式配置对话框
 """
 
 import os
-from typing import List, Tuple, Dict, Any, Optional
+from collections import Counter
+from typing import List, Tuple, Dict, Any, Optional, Set
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog,
@@ -31,6 +32,8 @@ class KeySelectDialog(QDialog):
         self.concurrency = concurrency
         self.available_files = []
         self.checkboxes: Dict[str, QCheckBox] = {}
+        self._file_key_sets: Dict[str, Set[str]] = {}
+        self._selected_key_counts: Counter = Counter()
 
         self._init_ui()
         self._load_file_list()
@@ -124,6 +127,8 @@ class KeySelectDialog(QDialog):
         self.available_files = KeyManager.list_available_files()
         self.table.setRowCount(len(self.available_files))
         self.checkboxes.clear()
+        self._file_key_sets.clear()
+        self._selected_key_counts.clear()
 
         for row, item in enumerate(self.available_files):
             fname = item["filename"]
@@ -134,9 +139,11 @@ class KeySelectDialog(QDialog):
             else:
                 checked = item.get("is_default", False)
 
+            self._file_key_sets[fname] = set(item.get("keys", []))
+
             chk = QCheckBox()
             chk.setChecked(checked)
-            chk.stateChanged.connect(self._update_summary)
+            chk.stateChanged.connect(lambda state, name=fname: self._on_file_toggled(name, state))
             self.checkboxes[fname] = chk
 
             # 居中放置 CheckBox
@@ -167,19 +174,42 @@ class KeySelectDialog(QDialog):
             it_desc.setToolTip(item["desc"])
             self.table.setItem(row, 3, it_desc)
 
+        self._rebuild_selected_counts()
+
+    def _on_file_toggled(self, fname: str, state: int):
+        """增量维护密钥出现次数，避免每次勾选都全量合并大字典"""
+        keys = self._file_key_sets.get(fname, set())
+        if state:
+            for key in keys:
+                self._selected_key_counts[key] += 1
+        else:
+            for key in keys:
+                self._selected_key_counts[key] -= 1
+                if self._selected_key_counts[key] <= 0:
+                    del self._selected_key_counts[key]
+        self._update_summary()
+
+    def _rebuild_selected_counts(self):
+        self._selected_key_counts.clear()
+        for fname, chk in self.checkboxes.items():
+            if chk.isChecked():
+                for key in self._file_key_sets.get(fname, set()):
+                    self._selected_key_counts[key] += 1
+
     def _set_all_checked(self, state: bool):
         for chk in self.checkboxes.values():
             chk.setChecked(state)
+        self._rebuild_selected_counts()
         self._update_summary()
 
     def _update_summary(self):
-        """实时重新计算选中的去重密钥总数并更新提示"""
+        """实时显示选中的去重密钥总数 (基于增量计数)"""
         selected_files = self.get_selected_files()
-        combined = KeyManager.load_combined_keys(selected_files, include_defaults_fallback=False)
+        total = sum(1 for count in self._selected_key_counts.values() if count > 0)
         self.lbl_summary.setText(
-            f"📊 已选 {len(selected_files)} 个字典文件 | 合计去重有效密钥: {len(combined):,} 条"
+            f"📊 已选 {len(selected_files)} 个字典文件 | 合计去重有效密钥: {total:,} 条"
         )
-        if len(combined) > 500:
+        if total > 500:
             self.lbl_summary.setStyleSheet("font-size: 12px; font-weight: bold; color: #F59E0B;")
         else:
             self.lbl_summary.setStyleSheet("font-size: 12px; font-weight: bold; color: #34D399;")

@@ -196,7 +196,6 @@ class CardManageWidget(QWidget):
                         c.get("swipe_count"), c.get("last_swiped_at"), c.get("note")
                     ])
             QMessageBox.information(self, "导出成功", f"卡片列表已导出至:\n{path}")
-            QMessageBox.information(self, "导出成功", f"卡片列表已导出至:\n{path}")
 
     def _on_export_logs(self):
         path, _ = QFileDialog.getSaveFileName(self, "导出刷卡流水", "swipe_logs.csv", "CSV 文件 (*.csv)")
