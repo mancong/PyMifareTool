@@ -9,6 +9,7 @@ import sys
 import argparse
 import asyncio
 import tempfile
+import logging
 
 # 避免 Matplotlib 在受限 Windows 主目录下创建缓存报 [WinError 5] 拒绝访问
 if "MPLCONFIGDIR" not in os.environ:
