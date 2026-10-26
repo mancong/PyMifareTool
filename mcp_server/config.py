@@ -2,15 +2,16 @@
 """
 PyMifareTool - MCP (Model Context Protocol) 服务端配置中心
 支持通过 JSON 配置文件、环境变量或命令行参数对 MCP 服务端进行动态定制
-支持配置运行模式 (stdio/sse)、监听 IP/端口、启用的功能模块子集与安全限制
+支持配置运行模式 (stdio/sse)、监听 IP/端口、启用的功能模块子集与工具级精细开关 (Key-Value 字典)
 """
 
 import os
 import json
 from enum import Enum
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 
-DEFAULT_CONFIG_FILENAME = "mcp_server_config.json"
+# 默认配置文件指向独立目录 mcp_server/mcp_server_config.json
+DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_server_config.json")
 
 
 class McpFeatureCategory(str, Enum):
@@ -28,6 +29,45 @@ class McpFeatureCategory(str, Enum):
 
 ALL_CATEGORIES: List[str] = [cat.value for cat in McpFeatureCategory]
 
+# 35 个全量工具列表及其所属大类映射
+ALL_TOOLS_MAPPING: Dict[str, str] = {
+    "get_mcp_service_status": "hardware",
+    "list_serial_ports": "hardware",
+    "connect_reader": "hardware",
+    "disconnect_reader": "hardware",
+    "get_device_status": "hardware",
+    "probe_capabilities": "hardware",
+    "poll_card": "card",
+    "is_card_present": "card",
+    "convert_uid_formats": "card",
+    "authenticate_sector": "m1",
+    "read_block": "m1",
+    "write_block": "m1",
+    "read_sector": "m1",
+    "write_magic_block0": "m1",
+    "lock_ufuid_card": "m1",
+    "list_key_dictionaries": "cracking",
+    "parse_key_dictionary_file": "cracking",
+    "save_custom_keys": "cracking",
+    "get_card_known_keys": "cracking",
+    "crack_card_keys": "cracking",
+    "read_id_card": "id_card",
+    "send_apdu": "cpu_card",
+    "read_cpu_card_public_info": "cpu_card",
+    "scan_cpu_card_filesystem": "cpu_card",
+    "load_dump_file": "dump",
+    "save_dump_file": "dump",
+    "get_dump_summary": "dump",
+    "verify_and_repair_dump": "dump",
+    "compare_dumps": "dump",
+    "query_card_profile": "database",
+    "upsert_card_profile": "database",
+    "list_registered_cards": "database",
+    "get_swipe_history": "database",
+    "record_swipe_log": "database",
+    "get_external_tools_status": "external_tools",
+}
+
 
 class McpServerConfig:
     """MCP 服务端运行与安全配置模型"""
@@ -38,7 +78,8 @@ class McpServerConfig:
         host: str = "127.0.0.1",
         port: int = 8000,
         server_name: str = "PyMifareTool-MCP",
-        enabled_categories: Optional[List[str]] = None,
+        enabled_categories: Optional[Union[Dict[str, bool], List[str]]] = None,
+        enabled_tools: Optional[Union[Dict[str, bool], List[str]]] = None,
         disabled_tools: Optional[List[str]] = None,
         allow_block0_write: bool = False,
         default_port: str = "COM3",
@@ -50,13 +91,30 @@ class McpServerConfig:
         self.transport = transport.lower()
         self.host = host
         self.port = port
-        self.enabled_categories = list(enabled_categories) if enabled_categories is not None else list(ALL_CATEGORIES)
-        self.disabled_tools = list(disabled_tools) if disabled_tools is not None else []
         self.allow_block0_write = bool(allow_block0_write)
         self.default_port = default_port
         self.default_baudrate = default_baudrate
         self.default_device_type = default_device_type
         self.db_path = db_path
+        self.disabled_tools = list(disabled_tools) if disabled_tools is not None else []
+
+        # 1. 解析分类配置：支持字典 {"hardware": True, "m1": False} 或列表 ["hardware", "m1"]
+        self.categories_dict: Dict[str, bool] = {}
+        if isinstance(enabled_categories, dict):
+            self.categories_dict = {str(k): bool(v) for k, v in enabled_categories.items()}
+        elif isinstance(enabled_categories, list):
+            self.categories_dict = {cat: (cat in enabled_categories) for cat in ALL_CATEGORIES}
+        else:
+            self.categories_dict = {cat: True for cat in ALL_CATEGORIES}
+
+        # 2. 解析工具级开关配置：支持字典 {"poll_card": True, "lock_ufuid_card": False} 或列表
+        self.tools_dict: Dict[str, bool] = {}
+        if isinstance(enabled_tools, dict):
+            self.tools_dict = {str(k): bool(v) for k, v in enabled_tools.items()}
+        elif isinstance(enabled_tools, list):
+            self.tools_dict = {t: (t in enabled_tools) for t in ALL_TOOLS_MAPPING.keys()}
+        else:
+            self.tools_dict = {t: True for t in ALL_TOOLS_MAPPING.keys()}
 
     @property
     def transport_mode(self) -> str:
@@ -66,41 +124,68 @@ class McpServerConfig:
     def transport_mode(self, val: str):
         self.transport = val.lower()
 
+    @property
+    def enabled_categories(self) -> List[str]:
+        """向后兼容属性：返回当前启用的分类字符串列表"""
+        return [k for k, v in self.categories_dict.items() if v]
+
+    @enabled_categories.setter
+    def enabled_categories(self, val: Union[Dict[str, bool], List[str]]):
+        if isinstance(val, dict):
+            self.categories_dict = {str(k): bool(v) for k, v in val.items()}
+        elif isinstance(val, list):
+            self.categories_dict = {cat: (cat in val) for cat in ALL_CATEGORIES}
+
     def is_category_enabled(self, category: Any) -> bool:
-        """检查特定功能类别是否已配置启用"""
+        """检查特定功能类别是否启用"""
         cat_str = category.value if isinstance(category, Enum) else str(category)
-        return cat_str in self.enabled_categories
+        return self.categories_dict.get(cat_str, True)
 
     def is_tool_enabled(self, tool_name: str) -> bool:
-        """检查特定工具是否未被显式禁用"""
-        return tool_name not in self.disabled_tools
+        """检查特定工具是否已配置启用（综合分类总开关与工具独立细分开关）"""
+        # 1. 显式禁用列表拦截
+        if tool_name in self.disabled_tools:
+            return False
+
+        # 2. 工具独立开关判定
+        if tool_name in self.tools_dict and not self.tools_dict[tool_name]:
+            return False
+
+        # 3. 工具所属分类总开关判定
+        cat = ALL_TOOLS_MAPPING.get(tool_name)
+        if cat and not self.is_category_enabled(cat):
+            return False
+
+        return True
 
     def to_dict(self) -> Dict[str, Any]:
-        """序列化为字典对象"""
+        """序列化为标准 JSON 友好字典"""
         return {
             "server_name": self.server_name,
             "transport_mode": self.transport,
             "host": self.host,
             "port": self.port,
-            "enabled_categories": self.enabled_categories,
-            "disabled_tools": self.disabled_tools,
-            "allow_block0_write": self.allow_block0_write,
             "default_port": self.default_port,
             "default_baudrate": self.default_baudrate,
             "default_device_type": self.default_device_type,
+            "allow_block0_write": self.allow_block0_write,
+            "enabled_categories": self.categories_dict,
+            "enabled_tools": self.tools_dict,
+            "disabled_tools": self.disabled_tools,
             "db_path": self.db_path,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "McpServerConfig":
-        """从字典载入配置"""
+        """从字典载入配置（智能兼容各种结构）"""
         t = data.get("transport_mode") or data.get("transport", "stdio")
         return cls(
             server_name=data.get("server_name", "PyMifareTool-MCP"),
             transport=t,
             host=data.get("host", "127.0.0.1"),
             port=int(data.get("port", 8000)),
-            enabled_categories=data.get("enabled_categories", ALL_CATEGORIES),
+            enabled_categories=data.get("enabled_categories"),
+            enabled_tools=data.get("enabled_tools") or data.get("tools"),
             disabled_tools=data.get("disabled_tools", []),
             allow_block0_write=bool(data.get("allow_block0_write", False)),
             default_port=data.get("default_port", "COM3"),
@@ -118,17 +203,8 @@ class McpServerConfig:
 
     @classmethod
     def load(cls, config_path: Optional[str] = None) -> "McpServerConfig":
-        """
-        自适应载入配置文件，优先级：
-        1. 指定的 config_path 路径
-        2. 环境变量 PYMIFARE_MCP_CONFIG 指定路径
-        3. 项目根目录下的 mcp_server_config.json
-        4. 全局默认配置 (并自动落盘模板)
-        """
-        target_path = config_path or os.environ.get("PYMIFARE_MCP_CONFIG")
-        if not target_path:
-            root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            target_path = os.path.join(root_dir, DEFAULT_CONFIG_FILENAME)
+        """自适应加载配置文件，优先使用独立目录中的配置文件"""
+        target_path = config_path or os.environ.get("PYMIFARE_MCP_CONFIG") or DEFAULT_CONFIG_PATH
 
         if os.path.exists(target_path):
             try:

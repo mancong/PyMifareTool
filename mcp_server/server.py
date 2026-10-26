@@ -45,6 +45,25 @@ ISO14443-4 CPU 卡原生 APDU 交互与交通联合电子钱包查询、M1 字�
 
     ctx = McpContext(config=cfg)
 
+    # 动态拦截工具注册，依据配置字典进行细粒度启用/禁用过滤
+    original_tool = mcp.tool
+
+    def filtered_tool(*args, **kwargs):
+        name_hint = kwargs.get("name")
+        if not name_hint and args and isinstance(args[0], str):
+            name_hint = args[0]
+
+        def decorator(fn):
+            actual_name = name_hint or getattr(fn, "__name__", "")
+            if cfg.is_tool_enabled(actual_name):
+                return original_tool(*args, **kwargs)(fn)
+            logger.debug("工具 %s 已在配置中被禁用，跳过注册", actual_name)
+            return fn
+
+        return decorator
+
+    mcp.tool = filtered_tool
+
     # 1. 注册基础状态工具
     @mcp.tool(
         name="get_mcp_service_status",
