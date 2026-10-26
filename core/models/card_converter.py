@@ -104,5 +104,6 @@ class CardConverter:
 
         result["uid_type"] = card_desc
         result["card_type"] = card_desc  # 兼容 card_db 键名读取
-
         return result
+
+    convert = convert_uid

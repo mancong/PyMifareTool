@@ -5,10 +5,13 @@ PyMifareTool - 物理串口传输实现 (SerialTransport)
 严格执行硬件交互红线 1: 物理复位保护 (DTR=False, RTS=False)
 """
 
+import logging
 import threading
 import serial
 from typing import Optional
 from .base import CallableBool, CallableInt, ITransport, TransportError
+
+logger = logging.getLogger("pymifare.transport.serial")
 
 
 class SerialTransport(ITransport):
@@ -58,8 +61,8 @@ class SerialTransport(ITransport):
             if self._serial and self._serial.is_open:
                 try:
                     self._serial.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("关闭底层串口对象异常: %s", e)
             self._serial = None
 
     @property
@@ -77,8 +80,8 @@ class SerialTransport(ITransport):
         if self._serial is not None and self._serial.is_open:
             try:
                 self._serial.dtr = self._dtr
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("DTR 设置失败 (硬件可能不支持): %s", e)
 
     @property
     def rts(self) -> bool:
@@ -90,13 +93,13 @@ class SerialTransport(ITransport):
         if self._serial is not None and self._serial.is_open:
             try:
                 self._serial.rts = self._rts
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("RTS 设置失败 (硬件可能不支持): %s", e)
 
     def write(self, data: bytes) -> int:
-        if not self.is_open:
-            raise TransportError("串口未连接或已关闭")
         with self._lock:
+            if not self._serial or not self._serial.is_open:
+                raise TransportError("串口未连接或已关闭")
             try:
                 n = self._serial.write(data)
                 self._serial.flush()
@@ -105,9 +108,9 @@ class SerialTransport(ITransport):
                 raise TransportError(f"串口写失败: {e}")
 
     def read(self, size: int = 1, timeout: Optional[float] = None) -> bytes:
-        if not self.is_open:
-            raise TransportError("串口未连接或已关闭")
         with self._lock:
+            if not self._serial or not self._serial.is_open:
+                raise TransportError("串口未连接或已关闭")
             try:
                 if timeout is not None:
                     old_to = self._serial.timeout
@@ -122,30 +125,30 @@ class SerialTransport(ITransport):
 
     def flush(self) -> None:
         """刷新输出缓冲区 (与 pyserial 语义一致)"""
-        if self.is_open:
-            with self._lock:
+        with self._lock:
+            if self._serial and self._serial.is_open:
                 try:
                     self._serial.flush()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("刷新串口输出缓冲区异常: %s", e)
 
     def reset_input_buffer(self) -> None:
         """清空输入缓冲区"""
-        if self.is_open:
-            with self._lock:
+        with self._lock:
+            if self._serial and self._serial.is_open:
                 try:
                     self._serial.reset_input_buffer()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("清空输入缓冲区异常: %s", e)
 
     def reset_output_buffer(self) -> None:
         """清空输出缓冲区"""
-        if self.is_open:
-            with self._lock:
+        with self._lock:
+            if self._serial and self._serial.is_open:
                 try:
                     self._serial.reset_output_buffer()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("清空输出缓冲区异常: %s", e)
 
     @property
     def in_waiting(self) -> CallableInt:

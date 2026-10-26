@@ -57,6 +57,20 @@ class AccessBitsDecoder:
     按照 NXP 官方 AN1305 标准, 从 4 字节控制位中提取 C1/C2/C3 并映射权限
     """
 
+    def __init__(self, access_bytes: Any = None):
+        if isinstance(access_bytes, (bytes, bytearray)):
+            self.access_bytes = bytes(access_bytes)
+            self._parsed = self.decode(self.access_bytes)
+        else:
+            self.access_bytes = b""
+            self._parsed = {}
+
+    def is_valid(self) -> bool:
+        return bool(self._parsed.get("valid", False))
+
+    def describe(self) -> Dict[str, Any]:
+        return self._parsed
+
     DATA_BLOCK_ACCESS = {
         (0, 0, 0): {"read": "KeyA|B", "write": "KeyA|B", "increment": "KeyA|B", "dec_transfer_restore": "KeyA|B",
                      "desc": "可用KeyA/B自由读写、增减值 (出厂默认)"},

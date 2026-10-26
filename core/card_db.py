@@ -6,9 +6,12 @@ PyMifareTool - 本地发卡管理与刷卡流水 SQLite 数据库
 import os
 import sqlite3
 import datetime
+import logging
 import threading
 from contextlib import contextmanager
 from typing import List, Dict, Optional, Any
+
+logger = logging.getLogger("pymifare.card_db")
 
 
 class CardDatabase:
@@ -25,18 +28,18 @@ class CardDatabase:
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
-        if self._closed:
-            raise sqlite3.ProgrammingError("CardDatabase 已关闭")
-        conn = getattr(self._local, "conn", None)
-        if conn is None:
-            conn = sqlite3.connect(self.db_path, timeout=5.0, check_same_thread=False)
-            conn.execute("PRAGMA busy_timeout = 5000")
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.execute("PRAGMA synchronous = NORMAL")
-            self._local.conn = conn
-            with self._connections_lock:
+        with self._connections_lock:
+            if self._closed:
+                raise sqlite3.ProgrammingError("CardDatabase 已关闭")
+            conn = getattr(self._local, "conn", None)
+            if conn is None:
+                conn = sqlite3.connect(self.db_path, timeout=5.0, check_same_thread=False)
+                conn.execute("PRAGMA busy_timeout = 5000")
+                conn.execute("PRAGMA journal_mode = WAL")
+                conn.execute("PRAGMA synchronous = NORMAL")
+                self._local.conn = conn
                 self._connections.add(conn)
-        return conn
+            return conn
 
     @contextmanager
     def _cursor(self, write: bool = False):
@@ -80,8 +83,8 @@ class CardDatabase:
             if "wiegand_34" not in existing_cols:
                 try:
                     c.execute("ALTER TABLE cards ADD COLUMN wiegand_34 TEXT")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("添加 wiegand_34 列跳过或异常: %s", e)
 
             c.execute("""
                 CREATE TABLE IF NOT EXISTS swipe_logs (
@@ -146,6 +149,60 @@ class CardDatabase:
                 "UPDATE cards SET card_name = ?, card_holder = ?, note = ? WHERE uid = ?",
                 (name, holder, note, uid)
             )
+
+    def upsert_card(
+        self,
+        uid: str,
+        card_name: str = "未命名卡片",
+        card_holder: str = "默认访客",
+        card_type: str = "Mifare Classic 1K",
+        note: str = "",
+        conv_info: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """按 UID 新增或更新卡片档案，字段严格对齐 cards 表结构。"""
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conv_info = conv_info or {}
+        dec_10d = conv_info.get("dec_10d_rev") or conv_info.get("dec_10d", "")
+        wiegand_26 = conv_info.get("wiegand_26", "")
+        wiegand_34 = conv_info.get("wiegand_34", "")
+
+        with self._cursor(write=True) as c:
+            c.execute("SELECT created_at, swipe_count FROM cards WHERE uid = ?", (uid,))
+            row = c.fetchone()
+            if row:
+                c.execute("""
+                    UPDATE cards
+                    SET card_name = ?, card_holder = ?, card_type = ?,
+                        dec_10d = ?, wiegand_26 = ?, wiegand_34 = ?, note = ?
+                    WHERE uid = ?
+                """, (card_name, card_holder, card_type, dec_10d, wiegand_26, wiegand_34, note, uid))
+                created_at = row[0] or now_str
+                swipe_count = row[1] if row[1] is not None else 1
+            else:
+                c.execute("""
+                    INSERT INTO cards (
+                        uid, card_name, card_holder, card_type, dec_10d,
+                        wiegand_26, wiegand_34, note, created_at, last_swiped_at, swipe_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    uid, card_name, card_holder, card_type, dec_10d,
+                    wiegand_26, wiegand_34, note, now_str, now_str, 1
+                ))
+                created_at = now_str
+                swipe_count = 1
+
+        return {
+            "uid": uid,
+            "card_name": card_name,
+            "card_holder": card_holder,
+            "card_type": card_type,
+            "dec_10d": dec_10d,
+            "wiegand_26": wiegand_26,
+            "wiegand_34": wiegand_34,
+            "note": note,
+            "created_at": created_at,
+            "swipe_count": swipe_count,
+        }
 
     def get_card(self, uid: str) -> Optional[Dict[str, Any]]:
         with self._cursor() as c:
@@ -279,20 +336,22 @@ class CardDatabase:
     def close(self):
         """关闭所有线程创建的连接并标记数据库为已关闭。"""
         with self._connections_lock:
+            if self._closed:
+                return
+            self._closed = True
             connections = list(self._connections)
             self._connections.clear()
+            self._local = threading.local()
         for conn in connections:
             try:
                 conn.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("关闭数据库连接时提交异常: %s", e)
             try:
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("关闭数据库连接时执行 WAL checkpoint 异常: %s", e)
             try:
                 conn.close()
-            except Exception:
-                pass
-        self._closed = True
-        self._local = threading.local()
+            except Exception as e:
+                logger.debug("关闭数据库连接异常: %s", e)

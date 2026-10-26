@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 """
+DEPRECATED: 请直接从 core.protocols.* 与 core.models.* 导入！
+此文件仅为旧代码路径提供向后兼容门面，不包含任何业务实现。
+
 PyMifareTool - 核心协议与算法向后兼容门面 (Protocols & Models Facade)
 向下兼容提供原 core.protocol 中的全部导出对象：
 - ReaderProtocol / AABBProtocol: AA BB 协议帧解包/构建、BCC 校验

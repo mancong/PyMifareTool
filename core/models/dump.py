@@ -158,6 +158,23 @@ class MifareDump:
             "trailer_hex": " ".join(f"{b:02X}" for b in trailer),
         }
 
+    @staticmethod
+    def _check_access_bits_valid(ac_bytes: bytes) -> bool:
+        """校验 4 字节控制字的取反互补关系 (AN1305 标准)"""
+        if len(ac_bytes) != 4:
+            return False
+        b6, b7, b8, _ = ac_bytes
+        for i in range(4):
+            c1_inv = (b6 >> i) & 1
+            c1_raw = (b7 >> (4 + i)) & 1
+            c2_inv = (b6 >> (4 + i)) & 1
+            c2_raw = (b8 >> i) & 1
+            c3_inv = (b7 >> i) & 1
+            c3_raw = (b8 >> (4 + i)) & 1
+            if c1_inv == c1_raw or c2_inv == c2_raw or c3_inv == c3_raw:
+                return False
+        return True
+
     def verify_dump(self) -> Dict[str, Any]:
         """全卡数据与权限完整性校验"""
         errors = []
@@ -179,24 +196,10 @@ class MifareDump:
             trailer = self.get_block(trailer_blk)
             ac_bytes = trailer[6:10]
 
-            if len(ac_bytes) == 4:
-                b6, b7, b8, _ = ac_bytes
-                sector_ac_valid = True
-                for i in range(4):
-                    c1_inv = (b6 >> i) & 1
-                    c1_raw = (b7 >> (4 + i)) & 1
-                    c2_inv = (b6 >> (4 + i)) & 1
-                    c2_raw = (b8 >> i) & 1
-                    c3_inv = (b7 >> i) & 1
-                    c3_raw = (b8 >> (4 + i)) & 1
-                    if c1_inv == c1_raw or c2_inv == c2_raw or c3_inv == c3_raw:
-                        sector_ac_valid = False
-                        break
-
-                if not sector_ac_valid:
-                    err_msg = f"扇区 {s:02d} 控制位损坏 (取反校验失败): {ac_bytes.hex().upper()}"
-                    errors.append(err_msg)
-                    ac_errors[s] = err_msg
+            if not self._check_access_bits_valid(ac_bytes):
+                err_msg = f"扇区 {s:02d} 控制位损坏 (取反校验失败): {ac_bytes.hex().upper()}"
+                errors.append(err_msg)
+                ac_errors[s] = err_msg
 
             key_a = trailer[0:6]
             key_b = trailer[10:16]
@@ -228,21 +231,9 @@ class MifareDump:
         for s in range(self.sector_count):
             trailer_blk = self.get_sector_trailer_block(s)
             trailer = bytearray(self.get_block(trailer_blk))
-            ac_bytes = trailer[6:10]
-            b6, b7, b8, b9 = ac_bytes
-            sector_ac_valid = True
-            for i in range(4):
-                c1_inv = (b6 >> i) & 1
-                c1_raw = (b7 >> (4 + i)) & 1
-                c2_inv = (b6 >> (4 + i)) & 1
-                c2_raw = (b8 >> i) & 1
-                c3_inv = (b7 >> i) & 1
-                c3_raw = (b8 >> (4 + i)) & 1
-                if c1_inv == c1_raw or c2_inv == c2_raw or c3_inv == c3_raw:
-                    sector_ac_valid = False
-                    break
+            ac_bytes = bytes(trailer[6:10])
 
-            if not sector_ac_valid:
+            if not self._check_access_bits_valid(ac_bytes):
                 trailer[6:10] = bytes([0xFF, 0x07, 0x80, 0x69])
                 self.set_block(trailer_blk, bytes(trailer))
                 fixed_items.append(f"扇区 {s:02d} 控制位重置为出厂默认 FF 07 80 69")
@@ -280,6 +271,7 @@ class MifareDump:
         parsed_blocks: Dict[int, bytes] = {}
         failed_blocks = set()
         sector_block_offset = 0
+        sectorless_block_idx = 0
 
         for line in lines:
             line_str = line.strip()
@@ -315,8 +307,8 @@ class MifareDump:
                     parsed_blocks[block_idx] = bytes.fromhex(hex_cand)
                     sector_block_offset += 1
                 else:
-                    idx = len(parsed_blocks)
-                    parsed_blocks[idx] = bytes.fromhex(hex_cand)
+                    parsed_blocks[sectorless_block_idx] = bytes.fromhex(hex_cand)
+                    sectorless_block_idx += 1
 
         total_sectors_touched = len(set(self.get_block_sector(b) for b in list(parsed_blocks.keys()) + list(failed_blocks)))
         if total_sectors_touched > 16 or any(k >= 64 for k in list(parsed_blocks.keys()) + list(failed_blocks)):

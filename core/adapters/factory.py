@@ -4,7 +4,6 @@ PyMifareTool - 读卡器适配器工厂与自动探测服务 (ReaderAdapterFacto
 支持插件式扩展注册第三方驱动与虚拟离线仿真
 """
 
-import time
 from typing import Optional, List, Dict, Type
 from .base_adapter import BaseReaderAdapter
 from core.transport.base import TransportLike
@@ -27,6 +26,7 @@ class ReaderAdapterFactory:
         ("🚀 PCR532 / PN532 双向读写器", DEVICE_PN532),
         ("📻 简易广播发卡器", DEVICE_BROADCASTER),
         ("💻 软件虚拟卡离线仿真", DEVICE_VIRTUAL),
+        ("🐧 libnfc 命令行工具链", DEVICE_LIBNFC),
     ]
 
     # 动态注册表，供未来插件或扩展模块动态注入新驱动
@@ -90,26 +90,35 @@ class ReaderAdapterFactory:
             return adapter
 
         # 自动识别逻辑
-        # 1. 尝试初始化 PN532
+        # 1. 广播发卡器固定为 38400bps 且不响应任何下行指令。
+        #    优先按波特率识别，避免向其发送 PN532 唤醒帧并清空其上行数据。
+        if int(getattr(ser, "baudrate", 0) or 0) == 38400:
+            broadcaster = BroadcasterAdapter()
+            broadcaster.init_device(ser)
+            return broadcaster
+
+        # 2. 先被动读取已有缓存，检查是否为 AA BB 广播流。
+        #    读出的数据会原样交给广播适配器，避免丢失首帧。
+        peeked = b""
+        try:
+            waiting = int(ser.in_waiting)
+            if waiting > 0:
+                peeked = ser.read(waiting)
+        except Exception:
+            peeked = b""
+
+        if b"\xAA\xBB" in peeked:
+            broadcaster = BroadcasterAdapter()
+            broadcaster.init_device(ser)
+            broadcaster.initial_rx_data = peeked
+            return broadcaster
+
+        # 3. 尝试初始化 PN532；init_device 会在固件与 SAM 均无应答时返回 False
         pn532 = PN532Adapter()
         if pn532.init_device(ser):
             fw = pn532.get_firmware_version(ser)
             if "PN532" in fw:
                 return pn532
 
-        # 2. 检查是否有 AA BB 广播数据流
-        time.sleep(0.08)
-        if ser.in_waiting > 0:
-            peek_data = ser.read(ser.in_waiting)
-            if b"\xAA\xBB" in peek_data:
-                broadcaster = BroadcasterAdapter()
-                broadcaster.init_device(ser)
-                return broadcaster
-
-        # 3. 根据波特率推断
-        if ser.baudrate == 38400:
-            broadcaster = BroadcasterAdapter()
-            broadcaster.init_device(ser)
-            return broadcaster
-
+        # 4. 兜底：115200 下仍按 PN532 兼容模式返回；其他波特率保持原行为
         return pn532

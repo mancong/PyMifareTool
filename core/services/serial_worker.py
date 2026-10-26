@@ -6,6 +6,7 @@ PyMifareTool - 异步串口监听与多硬件驱动调度后台工作线程 (基
 """
 
 import time
+import logging
 import threading
 from typing import Optional, Dict, Any
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -13,6 +14,9 @@ from core.protocols.aabb import ReaderProtocol
 from core.adapters import BaseReaderAdapter, PN532Adapter, BroadcasterAdapter, ReaderAdapterFactory
 from core.transport.base import TransportLike
 from core.transport.factory import TransportFactory
+from core.services.capability_probe import build_device_capabilities
+
+logger = logging.getLogger("pymifare.services.serial_worker")
 
 
 class SerialWorker(QThread):
@@ -25,6 +29,7 @@ class SerialWorker(QThread):
     sig_status = pyqtSignal(str)                  # 状态栏提示
     sig_response = pyqtSignal(dict)               # 命令响应帧 (用于主动指令的异步响应)
     sig_device_identified = pyqtSignal(str, str)  # 设备名称, 固件信息
+    sig_device_capabilities = pyqtSignal(dict)    # 设备能力与工具链汇总
 
     def __init__(self, port: str = "COM3", baudrate: int = 115200, device_type: str = "auto"):
         super().__init__()
@@ -231,7 +236,10 @@ class SerialWorker(QThread):
     def is_card_present(self) -> bool:
         """检查当前目标卡片是否仍在射频场中"""
         if hasattr(self.adapter, "is_card_present"):
-            return self.adapter.is_card_present()
+            try:
+                return bool(self.adapter.is_card_present(self._serial))
+            except TypeError:
+                return bool(self.adapter.is_card_present())
         return True
 
     def log_operation(self, msg: str):
@@ -361,7 +369,19 @@ class SerialWorker(QThread):
         self.sig_status.emit(f"已就绪: {self.adapter.device_name} ({self.adapter.firmware_info})")
         self.sig_raw_log.emit("SYS", f"硬件就绪: {self.adapter.device_name} | {self.adapter.firmware_info}")
 
-        rx_buffer = bytearray()
+        try:
+            capabilities = build_device_capabilities(
+                self.adapter,
+                connection=self.conn_type,
+                port=conn_display_name,
+                baudrate=conn_display_speed,
+            )
+            self.sig_device_capabilities.emit(capabilities)
+        except Exception as exc:
+            self.sig_raw_log.emit("SYS", f"设备能力汇总失败: {exc}")
+
+        initial_rx = getattr(self.adapter, "initial_rx_data", b"") if self.adapter else b""
+        rx_buffer = bytearray(initial_rx or b"")
         last_poll_time = 0.0
 
         while self._running:
@@ -432,6 +452,7 @@ class SerialWorker(QThread):
                 else:
                     time.sleep(0.02)
             except Exception as e:
+                logger.debug("SerialWorker 轮询循环捕获异常: %s (running=%s)", e, self._running)
                 if self._running:
                     self.sig_disconnected.emit(f"通信异常断开: {e}")
                 break
@@ -439,6 +460,6 @@ class SerialWorker(QThread):
         if self._serial and self._serial.is_open:
             try:
                 self._serial.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("SerialWorker 关闭底层传输失败: %s", e)
         self._running = False

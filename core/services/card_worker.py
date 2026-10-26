@@ -59,6 +59,11 @@ class CardOperationWorker(QThread):
     OP_WRITE_CARD = "write_card"
     OP_PROBE_FIRMWARE = "probe_firmware"
 
+    CRACK_MODE_FAST = "fast"   # 任一密钥命中即停止该扇区
+    CRACK_MODE_BOTH = "both"   # 必须同时恢复 Key A 与 Key B
+    CRACK_MODE_A = "a"         # 仅恢复 Key A
+    CRACK_MODE_B = "b"         # 仅恢复 Key B
+
     # 信号
     sig_progress = pyqtSignal(int, str)                # 进度 (0-100), 文本描述
     sig_log = pyqtSignal(str)                          # 详细流水日志
@@ -79,7 +84,8 @@ class CardOperationWorker(QThread):
         manual_key: Optional[Dict[str, Any]] = None,
         magic_type: str = "CUID",
         is_4k: Optional[bool] = None,
-        parent=None
+        parent=None,
+        crack_mode: str = "fast"
     ):
         super().__init__(parent)
         self.worker = worker
@@ -106,8 +112,31 @@ class CardOperationWorker(QThread):
         self.allow_block0_write = allow_block0_write
         self.magic_type = magic_type
         self.concurrency = max(1, concurrency)
+        self.crack_mode = self._normalize_crack_mode(crack_mode)
         self._hardware_lock = threading.Lock()
         self._abort = False
+        self._last_reactivate_ok: Optional[bool] = None
+
+    @classmethod
+    def _normalize_crack_mode(cls, mode: str) -> str:
+        value = str(mode or cls.CRACK_MODE_FAST).strip().lower()
+        valid = (cls.CRACK_MODE_FAST, cls.CRACK_MODE_BOTH, cls.CRACK_MODE_A, cls.CRACK_MODE_B)
+        return value if value in valid else cls.CRACK_MODE_FAST
+
+    def _mode_needs_a(self) -> bool:
+        return self.crack_mode in (self.CRACK_MODE_FAST, self.CRACK_MODE_BOTH, self.CRACK_MODE_A)
+
+    def _mode_needs_b(self) -> bool:
+        return self.crack_mode in (self.CRACK_MODE_FAST, self.CRACK_MODE_BOTH, self.CRACK_MODE_B)
+
+    def _sector_satisfied(self, found_a: Optional[str], found_b: Optional[str]) -> bool:
+        if self.crack_mode == self.CRACK_MODE_A:
+            return found_a is not None
+        if self.crack_mode == self.CRACK_MODE_B:
+            return found_b is not None
+        if self.crack_mode == self.CRACK_MODE_FAST:
+            return found_a is not None or found_b is not None
+        return found_a is not None and found_b is not None
 
     def abort(self):
         """中止当前操作"""
@@ -176,162 +205,217 @@ class CardOperationWorker(QThread):
 
         def check_card_absent() -> bool:
             nonlocal consecutive_absent
-            if hasattr(self.worker, "is_card_present") and not self.worker.is_card_present():
-                consecutive_absent += 1
-                if consecutive_absent >= 3:
-                    return True
+            reactivated = self._last_reactivate_ok
+            self._last_reactivate_ok = None
+            if reactivated is not None:
+                present = bool(reactivated)
+            elif hasattr(self.worker, "is_card_present"):
+                present = bool(self.worker.is_card_present())
             else:
-                consecutive_absent = 0
+                present = True
+            if not present:
+                consecutive_absent += 1
+                return consecutive_absent >= 3
+            consecutive_absent = 0
             return False
 
-        self.sig_log.emit(f"载入去重密钥: {len(keys_bytes):,} 条 | 待测扇区数: {total_sectors} ({'4K' if self.is_4k else '1K'})")
+        def abort_moved():
+            self.sig_log.emit("⚠️ 检测到卡片已移离读卡区，正在中止任务...")
+            self.sig_finished.emit(False, "卡片已移离读卡区，操作已自动中止", cracked_results)
+
+        def abort_manual():
+            self.sig_finished.emit(False, "操作已由用户手动中止", cracked_results)
+
+        def publish(sector: int, found_a: Optional[str], found_b: Optional[str]):
+            cracked_results[sector] = {
+                "key_a": found_a or "未破解",
+                "key_b": found_b or "未破解",
+            }
+            self.sig_sector_cracked.emit(sector, found_a or "未破解", found_b or "未破解")
+
+        def state_of(sector: int) -> Tuple[Optional[str], Optional[str]]:
+            cur = cracked_results.get(sector, {})
+            a = cur.get("key_a")
+            b = cur.get("key_b")
+            return (None if not a or a == "未破解" else a,
+                    None if not b or b == "未破解" else b)
+
+        mode_labels = {
+            self.CRACK_MODE_FAST: "快速模式 (任一 Key 命中即停止该扇区)",
+            self.CRACK_MODE_BOTH: "完整模式 (同时恢复 Key A 与 Key B)",
+            self.CRACK_MODE_A: "仅 Key A",
+            self.CRACK_MODE_B: "仅 Key B",
+        }
+        self.sig_log.emit(
+            f"载入去重密钥: {len(keys_bytes):,} 条 | 待测扇区数: {total_sectors} "
+            f"({'4K' if self.is_4k else '1K'}) | 恢复模式: {mode_labels.get(self.crack_mode, self.crack_mode)}"
+        )
 
         priority_keys = keys_bytes[:min(10, len(keys_bytes))]
 
+        # 阶段 1：高频弱密快速扫描
         for sector in list(unsolved_sectors):
             if self._abort:
-                self.sig_finished.emit(False, "操作已由用户手动中止", cracked_results)
+                abort_manual()
                 return
             trailer_block = helper_dump.get_sector_trailer_block(sector)
             found_a = None
             found_b = None
 
             for k in priority_keys:
-                if not found_a and self._authenticate_sector(trailer_block, "A", k) is True:
-                    found_a = k.hex().upper()
-                    solved_keys.add(k)
-                elif not found_a and check_card_absent():
-                    self.sig_log.emit("⚠️ 检测到卡片已移离读卡区，正在中止任务...")
-                    self.sig_finished.emit(False, "卡片已移离读卡区，操作已自动中止", cracked_results)
-                    return
-
-                if not found_b and self._authenticate_sector(trailer_block, "B", k) is True:
-                    found_b = k.hex().upper()
-                    solved_keys.add(k)
-                elif not found_b and check_card_absent():
-                    self.sig_log.emit("⚠️ 检测到卡片已移离读卡区，正在中止任务...")
-                    self.sig_finished.emit(False, "卡片已移离读卡区，操作已自动中止", cracked_results)
-                    return
-
-                if found_a and found_b:
+                if self._sector_satisfied(found_a, found_b):
                     break
 
-            if found_a or found_b:
-                cracked_results[sector] = {
-                    "key_a": found_a or "未破解",
-                    "key_b": found_b or "未破解",
-                }
-                self.sig_sector_cracked.emit(sector, found_a or "未破解", found_b or "未破解")
-                if found_a and found_b:
-                    unsolved_sectors.remove(sector)
-                    self.sig_log.emit(f"★ [阶段1速解] 扇区 S{sector:02d} 全部命中! KeyA={found_a} KeyB={found_b}")
+                if self._mode_needs_a() and found_a is None:
+                    if self._authenticate_sector(trailer_block, "A", k) is True:
+                        found_a = k.hex().upper()
+                        solved_keys.add(k)
+                        self.sig_log.emit(f"✔ 命中扇区 S{sector:02d} Key A: {found_a}")
+                    elif check_card_absent():
+                        abort_moved()
+                        return
 
+                if self._sector_satisfied(found_a, found_b):
+                    break
+
+                if self._mode_needs_b() and found_b is None:
+                    if self._authenticate_sector(trailer_block, "B", k) is True:
+                        found_b = k.hex().upper()
+                        solved_keys.add(k)
+                        self.sig_log.emit(f"✔ 命中扇区 S{sector:02d} Key B: {found_b}")
+                    elif check_card_absent():
+                        abort_moved()
+                        return
+
+            if found_a or found_b:
+                publish(sector, found_a, found_b)
+                if self._sector_satisfied(found_a, found_b):
+                    if sector in unsolved_sectors:
+                        unsolved_sectors.remove(sector)
+                    self.sig_log.emit(
+                        f"★ [阶段1速解] 扇区 S{sector:02d} 命中! "
+                        f"KeyA={found_a or '未破解'} KeyB={found_b or '未破解'}"
+                    )
+
+        # 阶段 2：已恢复密钥跨扇区传导
         if solved_keys and unsolved_sectors:
             for sector in list(unsolved_sectors):
                 if self._abort:
-                    break
+                    abort_manual()
+                    return
                 trailer_block = helper_dump.get_sector_trailer_block(sector)
-                cur = cracked_results.get(sector, {"key_a": "未破解", "key_b": "未破解"})
-                found_a = cur["key_a"] if cur["key_a"] != "未破解" else None
-                found_b = cur["key_b"] if cur["key_b"] != "未破解" else None
+                found_a, found_b = state_of(sector)
+                changed = False
 
-                for k in solved_keys:
-                    if not found_a and self._authenticate_sector(trailer_block, "A", k) is True:
-                        found_a = k.hex().upper()
-                    if not found_b and self._authenticate_sector(trailer_block, "B", k) is True:
-                        found_b = k.hex().upper()
-                    if found_a and found_b:
+                for k in list(solved_keys):
+                    if self._sector_satisfied(found_a, found_b):
                         break
+                    if self._mode_needs_a() and found_a is None:
+                        if self._authenticate_sector(trailer_block, "A", k) is True:
+                            found_a = k.hex().upper()
+                            changed = True
+                            self.sig_log.emit(f"✔ 命中扇区 S{sector:02d} Key A: {found_a}")
+                        elif check_card_absent():
+                            abort_moved()
+                            return
+                    if self._sector_satisfied(found_a, found_b):
+                        break
+                    if self._mode_needs_b() and found_b is None:
+                        if self._authenticate_sector(trailer_block, "B", k) is True:
+                            found_b = k.hex().upper()
+                            changed = True
+                            self.sig_log.emit(f"✔ 命中扇区 S{sector:02d} Key B: {found_b}")
+                        elif check_card_absent():
+                            abort_moved()
+                            return
 
-                cracked_results[sector] = {
-                    "key_a": found_a or "未破解",
-                    "key_b": found_b or "未破解",
-                }
-                self.sig_sector_cracked.emit(sector, found_a or "未破解", found_b or "未破解")
-                if found_a and found_b and sector in unsolved_sectors:
+                if changed:
+                    publish(sector, found_a, found_b)
+                if self._sector_satisfied(found_a, found_b) and sector in unsolved_sectors:
                     unsolved_sectors.remove(sector)
-                    self.sig_log.emit(f"★ [阶段2传导] 扇区 S{sector:02d} 复用命中! KeyA={found_a} KeyB={found_b}")
+                    self.sig_log.emit(
+                        f"★ [阶段2传导] 扇区 S{sector:02d} 复用命中! "
+                        f"KeyA={found_a or '未破解'} KeyB={found_b or '未破解'}"
+                    )
 
         remaining_keys = [k for k in keys_bytes if k not in priority_keys and k not in solved_keys]
 
+        # 阶段 3：key-major 深度扫描，同一密钥可同时命中多个扇区
         if unsolved_sectors and remaining_keys:
             total_keys = len(remaining_keys)
             self.sig_log.emit(
-                f"进入阶段 3 深度字典扫描: 剩余待解扇区 {len(unsolved_sectors)} 个, "
-                f"待测密钥 {total_keys:,} 条 (单扇区最坏 {total_keys * 2:,} 次认证)"
+                f"进入阶段 3 深度字典扫描 (key-major 跨扇区): 剩余待解扇区 "
+                f"{len(unsolved_sectors)} 个, 待测密钥 {total_keys:,} 条"
             )
-            # 进度打印步长：约每 4% 或至少每 20 条输出一次，避免刷屏与日志开销
             progress_step = max(20, total_keys // 25)
+            states = {sector: state_of(sector) for sector in unsolved_sectors}
 
-            for u_idx, sector in enumerate(unsolved_sectors):
+            for i, k in enumerate(remaining_keys):
                 if self._abort:
+                    abort_manual()
+                    return
+                if not unsolved_sectors:
                     break
 
-                trailer_block = helper_dump.get_sector_trailer_block(sector)
-                cur = cracked_results.get(sector, {"key_a": "未破解", "key_b": "未破解"})
-                found_a = cur["key_a"] if cur["key_a"] != "未破解" else None
-                found_b = cur["key_b"] if cur["key_b"] != "未破解" else None
-                need_a = found_a is None
-                need_b = found_b is None
-
-                self.sig_log.emit(f">> 正在深度扫描扇区 S{sector:02d} (剩余字典 {total_keys} 条) ...")
-                sector_start = time.time()
-
-                # 单趟扫描：逐把密钥同时尝试 KeyA / KeyB，命中即短路退出
-                for i, k in enumerate(remaining_keys):
+                for sector in list(unsolved_sectors):
                     if self._abort:
-                        break
+                        abort_manual()
+                        return
+                    found_a, found_b = states.get(sector, (None, None))
+                    if self._sector_satisfied(found_a, found_b):
+                        if sector in unsolved_sectors:
+                            unsolved_sectors.remove(sector)
+                        continue
 
-                    if need_a:
+                    trailer_block = helper_dump.get_sector_trailer_block(sector)
+                    changed = False
+
+                    if self._mode_needs_a() and found_a is None:
                         if self._authenticate_sector(trailer_block, "A", k) is True:
                             found_a = k.hex().upper()
                             solved_keys.add(k)
-                            need_a = False
+                            changed = True
                             self.sig_log.emit(f"✔ 命中扇区 S{sector:02d} Key A: {found_a}")
                         elif check_card_absent():
-                            self.sig_log.emit("⚠️ 检测到卡片已移离读卡区，正在中止任务...")
-                            self.sig_finished.emit(False, "卡片已移离读卡区，操作已自动中止", cracked_results)
+                            abort_moved()
                             return
 
-                    if need_b:
+                    if (not self._sector_satisfied(found_a, found_b)
+                            and self._mode_needs_b() and found_b is None):
                         if self._authenticate_sector(trailer_block, "B", k) is True:
                             found_b = k.hex().upper()
                             solved_keys.add(k)
-                            need_b = False
+                            changed = True
                             self.sig_log.emit(f"✔ 命中扇区 S{sector:02d} Key B: {found_b}")
                         elif check_card_absent():
-                            self.sig_log.emit("⚠️ 检测到卡片已移离读卡区，正在中止任务...")
-                            self.sig_finished.emit(False, "卡片已移离读卡区，操作已自动中止", cracked_results)
+                            abort_moved()
                             return
 
-                    if not need_a and not need_b:
-                        break
-
-                    if i and i % progress_step == 0:
-                        pct = int(((u_idx + i / total_keys) / len(unsolved_sectors)) * 100)
-                        self.sig_progress.emit(pct, f"扫描 S{sector:02d}: {i}/{total_keys}")
+                    states[sector] = (found_a, found_b)
+                    if changed:
+                        publish(sector, found_a, found_b)
+                    if self._sector_satisfied(found_a, found_b) and sector in unsolved_sectors:
+                        unsolved_sectors.remove(sector)
                         self.sig_log.emit(
-                            f"   进度 S{sector:02d}: {i}/{total_keys} ({int(i / total_keys * 100)}%)"
+                            f"★ [阶段3字典] 扇区 S{sector:02d} 恢复完成! "
+                            f"KeyA={found_a or '未破解'} KeyB={found_b or '未破解'}"
                         )
 
-                if found_a or found_b:
-                    cracked_results[sector] = {
-                        "key_a": found_a or "未破解",
-                        "key_b": found_b or "未破解",
-                    }
-                    self.sig_sector_cracked.emit(sector, found_a or "未破解", found_b or "未破解")
+                if i and i % progress_step == 0:
+                    pct = int(((i + 1) / total_keys) * 100)
+                    self.sig_progress.emit(pct, f"扫描密钥 {i + 1}/{total_keys} | 剩余扇区 {len(unsolved_sectors)}")
+                    self.sig_log.emit(
+                        f"   进度 {i + 1}/{total_keys} ({pct}%) | 剩余扇区 {len(unsolved_sectors)}"
+                    )
 
-                elapsed = time.time() - sector_start
-                status = "全部命中" if (found_a and found_b) else ("部分命中" if (found_a or found_b) else "未命中")
-                self.sig_log.emit(
-                    f"<< 扇区 S{sector:02d} 扫描完毕[{status}]: "
-                    f"KeyA={found_a or '未破解'} KeyB={found_b or '未破解'} (耗时 {elapsed:.1f}s)"
-                )
+        if self._abort:
+            abort_manual()
+            return
 
-                self.sig_progress.emit(
-                    int(((u_idx + 1) / len(unsolved_sectors)) * 100),
-                    f"扇区 S{sector:02d} 完成"
-                )
+        for sector in list(unsolved_sectors):
+            found_a, found_b = state_of(sector)
+            if self._sector_satisfied(found_a, found_b) and sector in unsolved_sectors:
+                unsolved_sectors.remove(sector)
 
         self.sig_progress.emit(100, "破解完成！")
         success_count = sum(1 for v in cracked_results.values() if v["key_a"] != "未破解" or v["key_b"] != "未破解")
@@ -391,6 +475,7 @@ class CardOperationWorker(QThread):
 
             for b_i in range(block_count):
                 if self._abort:
+                    self.sig_finished.emit(False, "读卡已被用户中止", dump)
                     return
                 block = first_block + b_i
                 data = self._read_single_block(block)
@@ -455,6 +540,7 @@ class CardOperationWorker(QThread):
         read_ok = 0
         for b_i in range(block_count):
             if self._abort:
+                self.sig_finished.emit(False, "读取扇区已被用户中止", None)
                 return
             block = first_block + b_i
             data = self._read_single_block(block)
@@ -556,12 +642,17 @@ class CardOperationWorker(QThread):
         is_bidi = bool(adapter and getattr(adapter, "is_bidirectional", False))
         ser = getattr(self.worker, "_serial", None)
 
-        if is_bidi and ser and ser.is_open:
+        if is_bidi and (not ser or not ser.is_open):
+            self.sig_finished.emit(False, "固件探测失败: 串口未打开", None)
+            return
+
+        if is_bidi:
             self.sig_log.emit("开始 PCR532 / NXP PN532 双向指令集与硬件状态深度探测...")
             probe_results = {}
 
             # 1. 唤醒与同步
             if self._abort:
+                self.sig_finished.emit(False, "固件探测已被用户中止", None)
                 return
             self.sig_progress.emit(15, "正在测试: HSU 接口唤醒与链路同步 ...")
             self.sig_log.emit("发送探测指令: HSU Wakeup 引导前导序列")
@@ -576,6 +667,7 @@ class CardOperationWorker(QThread):
 
             # 2. 固件版本探测 (0x02 GetFirmwareVersion)
             if self._abort:
+                self.sig_finished.emit(False, "固件探测已被用户中止", None)
                 return
             self.sig_progress.emit(35, "正在测试: 固件版本查询 (GetFirmwareVersion) ...")
             self.sig_log.emit("发送探测指令: GetFirmwareVersion [CMD 0x02]")
@@ -590,6 +682,7 @@ class CardOperationWorker(QThread):
 
             # 3. SAM 射频配置 (0x14 SAMConfiguration)
             if self._abort:
+                self.sig_finished.emit(False, "固件探测已被用户中止", None)
                 return
             self.sig_progress.emit(55, "正在测试: SAM 射频参数配置 (SAMConfiguration) ...")
             self.sig_log.emit("发送探测指令: SAMConfiguration [CMD 0x14, Normal Mode]")
@@ -604,6 +697,7 @@ class CardOperationWorker(QThread):
 
             # 4. CIU 内部射频寄存器配置 (0x08 WriteRegister)
             if self._abort:
+                self.sig_finished.emit(False, "固件探测已被用户中止", None)
                 return
             self.sig_progress.emit(75, "正在测试: CIU 射频寄存器写入 (WriteRegister) ...")
             self.sig_log.emit("发送探测指令: WriteRegister [CMD 0x08, TxMode=106kbps TypeA]")
@@ -618,6 +712,7 @@ class CardOperationWorker(QThread):
 
             # 5. ISO14443-A 被动寻卡探测 (0x4A InListPassiveTarget)
             if self._abort:
+                self.sig_finished.emit(False, "固件探测已被用户中止", None)
                 return
             self.sig_progress.emit(90, "正在测试: ISO14443-A 寻卡信道 (InListPassiveTarget) ...")
             self.sig_log.emit("发送探测指令: InListPassiveTarget [CMD 0x4A, 106kbps Type A]")
@@ -637,69 +732,76 @@ class CardOperationWorker(QThread):
 
             supported_count = sum(1 for v in probe_results.values() if v.get("supported"))
             fw_display = probe_results.get("固件版本查询 (0x02)", {}).get("response", "PN532")
+            verified_features = []
+            if probe_results.get("固件版本查询 (0x02)", {}).get("supported"):
+                verified_features.append("固件版本查询")
+            if probe_results.get("SAM 模式配置 (0x14)", {}).get("supported"):
+                verified_features.append("SAM 射频配置")
+            if probe_results.get("CIU 寄存器配置 (0x08)", {}).get("supported"):
+                verified_features.append("CIU 寄存器读写")
+            if probe_results.get("ISO14443-A 寻卡 (0x4A)", {}).get("supported"):
+                verified_features.append("ISO14443-A 寻卡")
+            feature_text = "、".join(verified_features) if verified_features else "基础链路可响应"
+            mode_text = "PCR532 双向全功能模式" if supported_count == len(probe_results) else "PN532 双向兼容模式"
             summary = (
-                f"🎯 读卡器固件验证成功: NXP PN532 (PCR532 双向全功能模式)\n\n"
+                f"🎯 读卡器固件验证成功: NXP PN532 ({mode_text})\n\n"
                 f"• 固件版本: {fw_display}\n"
                 f"• 指令集测试: {supported_count}/{len(probe_results)} 项指令通过验证\n"
-                f"• 支持特性: ISO14443-A (M1/UID/CUID) 读写/破解、二代证 (ISO14443-B) GUID 读取、后门盲写"
+                f"• 已验证能力: {feature_text}"
             )
             self.sig_finished.emit(True, summary, probe_results)
             return
 
-        # 针对简易单向发卡器的探测回退逻辑
-        self.sig_log.emit("开始单向广播读卡器固件指令集兼容性探测...")
-        test_commands = [
-            ("寻卡请求 (Request A)", ReaderProtocol.build_request_a(), ReaderProtocol.CMD_REQUEST_A),
-            ("防冲突选卡 (Anticollision)", ReaderProtocol.build_anticollision(), ReaderProtocol.CMD_ANTICOLLISION),
-            ("固件版本查询 (Get Version)", ReaderProtocol.build_get_version(), ReaderProtocol.CMD_GET_VERSION),
-            ("LED 控制测试 (LED Flash)", ReaderProtocol.build_led_control(2), ReaderProtocol.CMD_LED_CONTROL),
-            ("蜂鸣器控制 (Buzzer Beep)", ReaderProtocol.build_buzzer_control(50), ReaderProtocol.CMD_BUZZER_CONTROL),
-        ]
+        # 简易单向广播发卡器：硬件红线 2 要求只读，禁止任何下行探测帧
+        self.sig_log.emit("检测到单向广播读卡器: 按硬件红线仅接收 AA BB 上行帧，不发送下行探测指令。")
+        self.sig_progress.emit(100, "单向广播器能力探测完成 (只读模式)")
+        probe_results = {
+            "单向广播模式": {
+                "supported": True,
+                "response": "仅接收 AA BB 自动上报 UID，无法进行下行固件查询",
+            }
+        }
+        self.sig_finished.emit(True, "读卡器为【单向广播 / 自动上报 UID 模式】。已跳过所有下行探测指令；上行广播能力请在自动轮询中贴卡确认。", probe_results)
 
-        probe_results = {}
-        for idx, (name, frame, cmd) in enumerate(test_commands):
-            if self._abort:
-                return
-            pct = int(((idx + 1) / len(test_commands)) * 100)
-            self.sig_progress.emit(pct, f"正在测试: {name} ...")
-            self.sig_log.emit(f"发送探测帧: {name} [CMD 0x{cmd:02X}]")
-
-            resp = self.worker.send_and_wait(cmd, frame[4:-1] if len(frame) > 5 else b"", timeout=0.3)
-            if resp:
-                probe_results[name] = {"supported": True, "response": resp}
-                self.sig_log.emit(f"✔ 收到固件积极应答: {resp.get('status')}")
-            else:
-                probe_results[name] = {"supported": False, "response": "超时无回包"}
-
-            time.sleep(0.05)
-
-        self.sig_progress.emit(100, "固件探测分析完成")
-
-        supported_cmds = [k for k, v in probe_results.items() if v["supported"]]
-        if supported_cmds:
-            summary = f"读卡器固件支持指令交互! 成功响应指令: {len(supported_cmds)} 项。"
-        else:
-            summary = "读卡器固件目前处于【单向广播 / 自动上报 UID 模式】。上位机主动查询指令未产生应答。"
-
-        self.sig_finished.emit(True, summary, probe_results)
+    def _reactivate_after_failure(self) -> Optional[bool]:
+        """认证失败后重新激活卡片，并记录结果供在位检测复用，避免额外寻卡命令。"""
+        if hasattr(self.worker, "reactivate_target"):
+            try:
+                return bool(self.worker.reactivate_target())
+            except TypeError:
+                try:
+                    return bool(self.worker.reactivate_target(timeout=0.25))
+                except Exception:
+                    return None
+            except Exception:
+                return None
+        if hasattr(self.worker, "poll_card_once"):
+            try:
+                return bool(self.worker.poll_card_once(timeout=0.15))
+            except Exception:
+                return None
+        return None
 
     def _authenticate_sector(self, block: int, key_type: str, key: bytes) -> Optional[bool]:
         """向读卡器发送认证指令 (自适应 PCR532/PN532 与 AA BB 协议，线程安全)"""
+        self._last_reactivate_ok = None
         with self._hardware_lock:
             if hasattr(self.worker, "authenticate"):
                 ok = self.worker.authenticate(block, key_type, key, timeout=0.25)
                 if not ok:
                     # 🚨 关键硬件保护：Mifare Classic 密码认证失败后，卡片会进入 HALT 状态拒绝后续所有指令！
                     # 必须立刻唤醒重新激活目标卡片，防止半加密卡的单扇区失败引发后续所有扇区雪崩式失败！
-                    if hasattr(self.worker, "reactivate_target"):
-                        self.worker.reactivate_target()
-                    elif hasattr(self.worker, "poll_card_once"):
-                        self.worker.poll_card_once(timeout=0.15)
+                    self._last_reactivate_ok = self._reactivate_after_failure()
                 return True if ok else False
             if hasattr(self.worker, "adapter") and self.worker.adapter and getattr(self.worker.adapter, "is_bidirectional", False):
                 ok = self.worker.adapter.authenticate(getattr(self.worker, "_serial", None), block, key_type, key, timeout=0.25)
                 if not ok and hasattr(self.worker.adapter, "reactivate_target"):
-                    self.worker.adapter.reactivate_target(getattr(self.worker, "_serial", None))
+                    try:
+                        self._last_reactivate_ok = bool(
+                            self.worker.adapter.reactivate_target(getattr(self.worker, "_serial", None))
+                        )
+                    except Exception:
+                        self._last_reactivate_ok = None
                 return True if ok else False
 
             cmd = ReaderProtocol.CMD_AUTH_KEY_A if key_type == "A" else ReaderProtocol.CMD_AUTH_KEY_B

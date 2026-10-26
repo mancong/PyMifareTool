@@ -7,6 +7,7 @@ PyMifareTool - 传输层工厂服务 (TransportFactory)
 from typing import Dict, Any, Type, Optional
 from .base import ITransport, TransportError
 from .serial_transport import SerialTransport
+from .tcp_transport import ModbusTcpTransport, TcpTransport
 
 
 class TransportFactory:
@@ -19,6 +20,8 @@ class TransportFactory:
 
     _registry: Dict[str, Type[ITransport]] = {
         TRANSPORT_SERIAL: SerialTransport,
+        TRANSPORT_TCP: TcpTransport,
+        TRANSPORT_MODBUS: ModbusTcpTransport,
     }
 
     @classmethod

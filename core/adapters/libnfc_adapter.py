@@ -20,7 +20,7 @@ class LibnfcCliAdapter(BaseReaderAdapter):
     def __init__(self, bin_dir: Optional[str] = None):
         super().__init__()
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        self.bin_dir = os.path.abspath(bin_dir) if bin_dir else os.path.join(project_root, "nfc-bin")
+        self.bin_dir = os.path.abspath(bin_dir) if bin_dir else os.path.join(project_root, "tools", "m1t", "nfc-bin")
         self.device_name = "libnfc CLI (PN532 / ACR122U)"
         self.is_bidirectional = True
         self.default_baudrate = 115200
@@ -165,3 +165,26 @@ class LibnfcCliAdapter(BaseReaderAdapter):
             return res.returncode == 0
         except Exception:
             return False
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        available = self.is_available()
+        has_list = self._find_binary("nfc-list") is not None
+        has_mfclassic = self._find_binary("nfc-mfclassic") is not None
+        has_mfoc = self._find_binary("mfoc") is not None or self._find_binary("mfoc2") is not None
+        has_mfcuk = self._find_binary("mfcuk") is not None or self._find_binary("mfcuk2") is not None
+        has_hardnested = self._find_binary("libnfc_hardnested") is not None
+        features = [
+            {"name": "nfc-list 寻卡 / UID 读取", "status": "external" if has_list else "unsupported", "detail": "通过 libnfc CLI 调用；需先断开 PyMifareTool 串口"},
+            {"name": "nfc-mfclassic 整卡读写", "status": "external" if has_mfclassic else "unsupported", "detail": "读写整卡 Dump，不支持单块交互"},
+            {"name": "mfoc nested 攻击", "status": "experimental" if has_mfoc else "unsupported", "detail": "需要可用的 libnfc 驱动与 PN532/ACR122U 设备"},
+            {"name": "mfcuk darkside 攻击", "status": "experimental" if has_mfcuk else "unsupported", "detail": "对部分卡片有效，耗时与卡片随机数强度相关"},
+            {"name": "libnfc_hardnested", "status": "experimental" if has_hardnested else "unsupported", "detail": "需已知密钥；PCR532 需替换 libnfc(532).dll，兼容性需真机实测"},
+        ]
+        payload = self._capability_payload(features)
+        payload["bin_dir"] = self.bin_dir
+        payload["available"] = available
+        payload["notes"] = [
+            "libnfc CLI 后端不持有串口句柄，运行外部工具前必须先在 PyMifareTool 中断开同一 COM 口。",
+            "PCR532 使用 libnfc(532).dll；ACR122U 使用 libnfc(ACR122Uslow).dll。",
+        ]
+        return payload

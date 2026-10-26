@@ -7,9 +7,11 @@ PyMifareTool - 密钥字典管理服务 (KeyManager Service)
 
 import os
 import re
-from typing import List, Dict, Any, Optional, Set
+import tempfile
+from typing import List, Dict, Any, Optional, Set, Tuple
 
 KEYS_DIR_NAME = "keys"
+CUSTOM_KEYS_FILE = "custom.keys"
 
 # MCT 核心标准字典描述映射
 KNOWN_KEY_FILES_INFO = {
@@ -38,6 +40,10 @@ class KeyManager:
     """M1 密钥字典加载、去重与批次组织管理中心"""
 
     HEX_KEY_PATTERN = re.compile(r"^[0-9A-Fa-f]{12}$")
+    # filepath -> (mtime_ns, size, parsed_keys)，避免每次勾选都全量重解析大字典
+    _file_cache: Dict[str, Tuple[int, int, List[str]]] = {}
+    # (dir_path, dir_mtime_ns, cached_result) 目录级缓存，避免每次打开弹窗重复全量 stat
+    _dir_cache: Optional[Tuple[str, int, List[Dict[str, Any]]]] = None
 
     @classmethod
     def get_keys_dir(cls) -> str:
@@ -60,13 +66,21 @@ class KeyManager:
 
     @classmethod
     def list_available_files(cls) -> List[Dict[str, Any]]:
-        """列出当前 keys 目录下的所有可用密钥文件元数据"""
+        """列出当前 keys 目录下的所有可用密钥文件元数据 (带目录级 mtime 缓存)"""
         keys_dir = cls.get_keys_dir()
-        result = []
-
         if not os.path.exists(keys_dir):
-            return result
+            return []
 
+        try:
+            dir_mtime_ns = os.stat(keys_dir).st_mtime_ns
+        except OSError:
+            dir_mtime_ns = 0
+
+        if cls._dir_cache and cls._dir_cache[0] == keys_dir and cls._dir_cache[1] == dir_mtime_ns:
+            # 命中目录级缓存，直接返回副本
+            return [dict(item) for item in cls._dir_cache[2]]
+
+        result = []
         for fname in os.listdir(keys_dir):
             if fname.lower().endswith((".keys", ".dic", ".txt")):
                 full_path = os.path.join(keys_dir, fname)
@@ -90,13 +104,25 @@ class KeyManager:
                 })
 
         result.sort(key=lambda x: (x["priority"], x["filename"]))
+        cls._dir_cache = (keys_dir, dir_mtime_ns, [dict(item) for item in result])
         return result
 
     @classmethod
     def parse_key_file(cls, filepath: str) -> List[str]:
-        """从单文件中读取、提取有效 12 字符十六进制密钥"""
+        """从单文件中读取、提取有效 12 字符十六进制密钥 (按 mtime/size 缓存)"""
         if not os.path.exists(filepath):
             return []
+
+        try:
+            stat = os.stat(filepath)
+            signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            signature = None
+
+        if signature is not None:
+            cached = cls._file_cache.get(filepath)
+            if cached and cached[0] == signature[0] and cached[1] == signature[1]:
+                return list(cached[2])
 
         keys = []
         seen = set()
@@ -117,7 +143,53 @@ class KeyManager:
         except Exception:
             pass
 
+        if signature is not None:
+            cls._file_cache[filepath] = (signature[0], signature[1], list(keys))
         return keys
+
+    @classmethod
+    def save_custom_keys(cls, keys) -> int:
+        """将密钥合并写入 keys/custom.keys (去重、保持原有顺序)，返回文件内总密钥数"""
+        keys_dir = cls.get_keys_dir()
+        target = os.path.join(keys_dir, CUSTOM_KEYS_FILE)
+        existing = cls.parse_key_file(target)
+        seen: Set[str] = set(existing)
+        merged: List[str] = list(existing)
+
+        for item in keys or []:
+            if isinstance(item, (list, tuple)):
+                candidates = item
+            else:
+                candidates = [item]
+            for raw in candidates:
+                if raw is None:
+                    continue
+                token = str(raw).strip().replace(" ", "")
+                if not cls.HEX_KEY_PATTERN.match(token):
+                    continue
+                token = token.upper()
+                if token not in seen:
+                    seen.add(token)
+                    merged.append(token)
+
+        os.makedirs(keys_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=keys_dir, suffix=".tmp", text=True)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                f.write("# PyMifareTool recovered keys\n")
+                f.write("# Format: 12 hex characters per line\n")
+                for key in merged:
+                    f.write(key + "\n")
+            os.replace(tmp_path, target)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+        cls._file_cache.pop(target, None)
+        return len(merged)
 
     @classmethod
     def load_combined_keys(

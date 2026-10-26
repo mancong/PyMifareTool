@@ -26,6 +26,27 @@ class BaseReaderAdapter(ABC):
         """获取固件版本信息"""
         return self.firmware_info
 
+    def _capability_payload(self, features: List[Dict[str, str]]) -> Dict[str, Any]:
+        return {
+            "device_name": self.device_name,
+            "firmware_info": self.firmware_info,
+            "is_bidirectional": self.is_bidirectional,
+            "adapter_type": self.__class__.__name__,
+            "features": features,
+        }
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        """返回基础设备能力描述，具体适配器可覆盖以提供更精确的探测结果"""
+        features = [
+            {"name": "设备通信", "status": "supported", "detail": "适配器已加载"},
+            {
+                "name": "下行卡片操作",
+                "status": "supported" if self.is_bidirectional else "unsupported",
+                "detail": "支持双向串口指令" if self.is_bidirectional else "仅接收上行广播，不发送下行指令",
+            },
+        ]
+        return self._capability_payload(features)
+
     @abstractmethod
     def init_device(self, ser: TransportLike) -> bool:
         """初始化设备与握手 (配置波特率、唤醒、SAM配置等)"""
