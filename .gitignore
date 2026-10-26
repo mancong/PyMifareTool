@@ -51,3 +51,6 @@ matplotlib-*/
 # SQLite WAL 临时文件
 cards.db-wal
 cards.db-shm
+
+/tools/m1t/nfc-bin/
+/docs/changes/

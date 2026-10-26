@@ -1,0 +1,18 @@
+# 自动规范文本换行符为 LF，禁止 Windows 下自动转 CRLF
+* text=auto eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.keys text eol=lf
+*.json text eol=lf
+*.qss text eol=lf
+*.ini text eol=lf
+*.editorconfig text eol=lf
+*.gitignore text eol=lf
+*.gitattributes text eol=lf
+
+# 二进制文件保留二进制原样
+*.db binary
+*.mfd binary
+*.dump binary
+*.bin binary
