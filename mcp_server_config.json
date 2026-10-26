@@ -1,0 +1,22 @@
+{
+  "server_name": "PyMifareTool-MCP",
+  "transport_mode": "stdio",
+  "host": "127.0.0.1",
+  "port": 8000,
+  "default_port": "COM3",
+  "default_baudrate": 115200,
+  "default_device_type": "auto",
+  "enabled_categories": [
+    "hardware",
+    "card",
+    "m1",
+    "cracking",
+    "id_card",
+    "cpu_card",
+    "dump",
+    "database",
+    "external_tools"
+  ],
+  "disabled_tools": [],
+  "allow_block0_write": false
+}

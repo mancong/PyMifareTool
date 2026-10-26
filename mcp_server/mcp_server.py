@@ -81,9 +81,19 @@ async def list_tools_cli(mcp):
 def main():
     args = parse_args()
 
-    # 1. 加载或新建配置
-    config_path = os.path.abspath(args.config)
-    if os.path.exists(config_path):
+    # 1. 智能定位配置文件
+    candidate_paths = [
+        os.path.abspath(args.config),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), args.config),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), args.config),
+    ]
+    config_path = None
+    for p in candidate_paths:
+        if os.path.exists(p):
+            config_path = p
+            break
+
+    if config_path:
         config = McpServerConfig.from_file(config_path)
     else:
         config = McpServerConfig()
@@ -110,23 +120,44 @@ def main():
         asyncio.run(list_tools_cli(mcp))
         return 0
 
-    logger.info("PyMifareTool MCP 服务启动中... [服务名: %s, 传输协议: %s]", config.server_name, config.transport_mode)
-
-    try:
-        if config.transport_mode == "sse":
-            logger.info("正在以 SSE 模式监听 http://%s:%d/ ...", config.host, config.port)
-            mcp.settings.host = config.host
-            mcp.settings.port = config.port
-            mcp.run(transport="sse")
-        else:
-            logger.info("正在以标准 stdio 模式运行...")
-            mcp.run(transport="stdio")
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("PyMifareTool MCP 服务正常关闭。")
-    finally:
-        ctx.close()
-
-    return 0
+    if config.transport_mode == "sse":
+        sse_url = f"http://{config.host}:{config.port}/sse"
+        msg_url = f"http://{config.host}:{config.port}/messages/"
+        banner = f"""
+======================================================================
+🚀 PyMifareTool MCP 服务已就绪 [网络 HTTP/SSE 模式]
+======================================================================
+服务名称: {config.server_name}
+服务监听: http://{config.host}:{config.port}
+🔗 SSE 订阅端点:   {sse_url}
+✉️  消息交互端点:  {msg_url}
+💡 第三方客户端配置指引:
+   在支持 SSE 模式的 MCP 客户端（如 Cursor、远程 Agent）中添加:
+   URL: {sse_url}
+======================================================================
+"""
+        print(banner, file=sys.stdout)
+        logger.info("SSE 服务监听中，按 Ctrl+C 可停止服务...")
+        mcp.settings.host = config.host
+        mcp.settings.port = config.port
+        mcp.run(transport="sse")
+    else:
+        banner = f"""
+======================================================================
+🚀 PyMifareTool MCP 服务已就绪 [标准输入输出 stdio 模式]
+======================================================================
+服务名称: {config.server_name}
+工作机制: 进程内标准输入输出流 (stdin / stdout) 通信
+使用场景: 本地客户端（Claude Desktop, Cursor, Cline, Antigravity 等）
+提示说明: stdio 模式专供本地 Agent 进程管道交互，不开放网络端口。
+        若需要网络/HTTP/SSE 访问，请运行:
+        python mcp_server.py --transport sse --host 0.0.0.0 --port 8000
+======================================================================
+"""
+        # stdio 模式下普通信息输出到 stderr，防止污染 stdout 的 JSON-RPC 报文
+        print(banner, file=sys.stderr)
+        logger.info("stdio 模式等待来自客户端的 JSON-RPC 管道调用...")
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
