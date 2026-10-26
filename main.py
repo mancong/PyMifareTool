@@ -6,6 +6,11 @@ PyMifareTool - 主程序启动入口
 
 import sys
 import os
+import tempfile
+
+# 避免 Matplotlib 在受限 Windows 主目录下创建缓存报 [WinError 5] 拒绝访问
+if "MPLCONFIGDIR" not in os.environ:
+    os.environ["MPLCONFIGDIR"] = os.path.join(tempfile.gettempdir(), "matplotlib")
 
 # 确保当前项目根目录在 sys.path 中
 project_root = os.path.dirname(os.path.abspath(__file__))
