@@ -1,12 +1,22 @@
 # -*- coding: utf-8 -*-
 """
 精细打印每一个 TX/RX 报文，定位 APDU 交换的真实细节
+
+用法: python tools/debug_trace_apdu.py [COM3] [115200]
 """
 import sys
 import time
 import serial
 
-sys.stdout.reconfigure(encoding="utf-8")
+
+def _init_stdout() -> None:
+    """Windows 控制台默认 GBK，强制 UTF-8 输出（无 reconfigure 的环境跳过）"""
+    if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 
 def build_hsu_frame(cmd, payload=b""):
     tfi = 0xD4
@@ -15,6 +25,7 @@ def build_hsu_frame(cmd, payload=b""):
     lcs = (-length) & 0xFF
     dcs = (-sum(data)) & 0xFF
     return bytes([0x00, 0x00, 0xFF, length, lcs]) + data + bytes([dcs, 0x00])
+
 
 def parse_frames(rx_bytes):
     frames = []
@@ -45,13 +56,8 @@ def parse_frames(rx_bytes):
         i = idx + 1
     return frames
 
-ser = serial.Serial("COM3", 115200, timeout=0.1)
-ser.dtr = False
-ser.rts = False
-ser.reset_input_buffer()
-ser.reset_output_buffer()
 
-def execute(cmd, payload=b"", timeout=0.6):
+def execute(ser, cmd, payload=b"", timeout=0.6):
     tx = build_hsu_frame(cmd, payload)
     print(f"\n[TX] cmd=0x{cmd:02X}, len={len(payload)}: {tx.hex().upper()}")
     ser.write(tx)
@@ -77,42 +83,62 @@ def execute(cmd, payload=b"", timeout=0.6):
     print(f"[RX 超时] 收到原始碎片: {rx_buf.hex().upper()}")
     return None
 
-# 1. 唤醒
-ser.write(bytes([0x55] * 16 + [0x00, 0x00, 0x00]))
-ser.flush()
-time.sleep(0.05)
-ser.reset_input_buffer()
 
-# 2. SAM
-execute(0x14, bytes([0x01, 0x14, 0x01]))
+def main(port="COM3", baudrate=115200):
+    ser = serial.Serial(port, baudrate, timeout=0.1)
+    ser.dtr = False
+    ser.rts = False
+    ser.reset_input_buffer()
+    ser.reset_output_buffer()
 
-# 3. 寻卡
-target_frame = execute(0x4A, bytes([0x01, 0x00]))
-if not target_frame:
-    print("未寻到卡")
-    ser.close()
-    sys.exit(0)
+    try:
+        # 1. 唤醒
+        ser.write(bytes([0x55] * 16 + [0x00, 0x00, 0x00]))
+        ser.flush()
+        time.sleep(0.05)
+        ser.reset_input_buffer()
 
-# 4. 执行选卡应用 APDU
-# 交通联合 AID: A0 00 00 03 33 01 01 01 -> APDU: 00 A4 04 00 08 A0 00 00 03 33 01 01 01
-apdu_tunion = bytes.fromhex("00A4040008A000000333010101")
-print("\n--- 发送 APDU: 选择全国交通联合 ---")
-# 注意 InDataExchange 的参数格式: [Tg (1字节)] + [DataOut]
-execute(0x40, bytes([0x01]) + apdu_tunion, timeout=0.8)
+        # 2. SAM
+        execute(ser, 0x14, bytes([0x01, 0x14, 0x01]))
 
-# 5. 尝试住建部城市互联互通: A0 00 00 00 03 86 98 07 01
-print("\n--- 发送 APDU: 选择住建部/城市公交 ---")
-apdu_city = bytes.fromhex("00A4040009A00000000386980701")
-execute(0x40, bytes([0x01]) + apdu_city, timeout=0.8)
+        # 3. 寻卡
+        target_frame = execute(ser, 0x4A, bytes([0x01, 0x00]))
+        if not target_frame:
+            print("未寻到卡")
+            return 0
 
-# 6. 尝试选择 3F00 (主目录)
-print("\n--- 发送 APDU: 选择 MF 3F00 ---")
-apdu_mf = bytes.fromhex("00A40000023F00")
-execute(0x40, bytes([0x01]) + apdu_mf, timeout=0.8)
+        # 4. 执行选卡应用 APDU
+        # 交通联合 AID: A0 00 00 03 33 01 01 01 -> APDU: 00 A4 04 00 08 A0 00 00 03 33 01 01 01
+        apdu_tunion = bytes.fromhex("00A4040008A000000333010101")
+        print("\n--- 发送 APDU: 选择全国交通联合 ---")
+        # 注意 InDataExchange 的参数格式: [Tg (1字节)] + [DataOut]
+        execute(ser, 0x40, bytes([0x01]) + apdu_tunion, timeout=0.8)
 
-# 7. 尝试选择 1001 (公共交通应用)
-print("\n--- 发送 APDU: 选择 DF 1001 ---")
-apdu_1001 = bytes.fromhex("00A40000021001")
-execute(0x40, bytes([0x01]) + apdu_1001, timeout=0.8)
+        # 5. 尝试住建部城市互联互通: A0 00 00 00 03 86 98 07 01
+        print("\n--- 发送 APDU: 选择住建部/城市公交 ---")
+        apdu_city = bytes.fromhex("00A4040009A00000000386980701")
+        execute(ser, 0x40, bytes([0x01]) + apdu_city, timeout=0.8)
 
-ser.close()
+        # 6. 尝试选择 3F00 (主目录)
+        print("\n--- 发送 APDU: 选择 MF 3F00 ---")
+        apdu_mf = bytes.fromhex("00A40000023F00")
+        execute(ser, 0x40, bytes([0x01]) + apdu_mf, timeout=0.8)
+
+        # 7. 尝试选择 1001 (公共交通应用)
+        print("\n--- 发送 APDU: 选择 DF 1001 ---")
+        apdu_1001 = bytes.fromhex("00A40000021001")
+        execute(ser, 0x40, bytes([0x01]) + apdu_1001, timeout=0.8)
+    finally:
+        try:
+            ser.close()
+        except Exception:
+            pass
+
+    return 0
+
+
+if __name__ == "__main__":
+    _init_stdout()
+    _port = sys.argv[1] if len(sys.argv) > 1 else "COM3"
+    _baud = int(sys.argv[2]) if len(sys.argv) > 2 else 115200
+    sys.exit(main(_port, _baud))

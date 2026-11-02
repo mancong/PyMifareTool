@@ -5,7 +5,7 @@ PyMifareTool - 卡号格式多行业标准换算模型 (CardConverter)
 """
 
 import os
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 
 class CardConverter:
@@ -40,15 +40,66 @@ class CardConverter:
             atqa_2b = b"\x04\x00"
 
         if len(uid) == 4:
-            bcc = uid[0] ^ uid[1] ^ uid[2] ^ uid[3]
+            bcc = CardConverter.block0_bcc(uid)
             mfg = manufacturer_data if (manufacturer_data and len(manufacturer_data) == 8) else bytes.fromhex("6263646566676869")
             return uid + bytes([bcc, sak & 0xFF]) + atqa_2b + mfg
         elif len(uid) == 7:
-            bcc = uid[3] ^ uid[4] ^ uid[5] ^ uid[6]
+            bcc = CardConverter.block0_bcc(uid)
             mfg = manufacturer_data if (manufacturer_data and len(manufacturer_data) == 5) else bytes.fromhex("0804000102")
             return uid + bytes([bcc, sak & 0xFF]) + atqa_2b + mfg
         else:
             raise ValueError(f"不支持的 UID 长度: {len(uid)} 字节 (仅支持 4 或 7 字节)")
+
+    @staticmethod
+    def block0_bcc(uid: bytes) -> int:
+        """计算 Block 0 中应写入的 BCC 校验字节"""
+        if len(uid) == 4:
+            return uid[0] ^ uid[1] ^ uid[2] ^ uid[3]
+        if len(uid) == 7:
+            return uid[3] ^ uid[4] ^ uid[5] ^ uid[6]
+        raise ValueError(f"不支持的 UID 长度: {len(uid)} 字节 (仅支持 4 或 7 字节)")
+
+    @staticmethod
+    def validate_block0(block0: bytes, uid_len: Optional[int] = None) -> Tuple[bool, str]:
+        """
+        反向校验 16 字节 Block 0 的布局与 BCC 是否正确
+        布局: [nB UID][1B BCC][1B SAK][2B ATQA][剩余厂商数据]，n ∈ {4, 7}
+        SAK / ATQA 取值异常仅作"注意"提示，不阻断写入（保留高级用户自定义能力）
+        返回 (是否可安全写入, 说明文本)
+        """
+        if not isinstance(block0, (bytes, bytearray)):
+            return False, "Block 0 必须是字节串"
+        data = bytes(block0)
+        if len(data) != 16:
+            return False, f"Block 0 长度必须为 16 字节，当前为 {len(data)} 字节"
+
+        if uid_len is None:
+            candidates = [4, 7]
+        elif int(uid_len) in (4, 7):
+            candidates = [int(uid_len)]
+        else:
+            return False, f"不支持的 UID 长度: {uid_len} 字节 (仅支持 4 或 7 字节)"
+
+        details = []
+        for n in candidates:
+            expected = CardConverter.block0_bcc(data[:n])
+            actual = data[n]
+            if actual != expected:
+                details.append(f"{n} 字节 UID 布局: BCC 应为 {expected:02X}，实际为 {actual:02X}")
+                continue
+            sak = data[n + 1]
+            atqa = data[n + 2:n + 4]
+            msg = (f"{n} 字节 UID 布局，BCC={actual:02X}，"
+                   f"SAK=0x{sak:02X}，ATQA={atqa.hex().upper()}")
+            notes = []
+            if sak in (0x00, 0xFF):
+                notes.append(f"SAK=0x{sak:02X} 非常规")
+            if atqa in (b"\x00\x00", b"\xFF\xFF"):
+                notes.append(f"ATQA={atqa.hex().upper()} 非常规")
+            if notes:
+                msg += "；注意: " + "、".join(notes)
+            return True, msg
+        return False, "；".join(details)
 
     @staticmethod
     def convert_uid(uid: bytes) -> Dict[str, Any]:

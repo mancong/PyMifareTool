@@ -57,13 +57,26 @@ class SerialTransport(ITransport):
                 return False
 
     def close(self) -> None:
-        with self._lock:
+        # 读线程可能持锁阻塞在 serial.read()，此处限时获取锁，避免断开时长时间卡死
+        acquired = self._lock.acquire(timeout=0.5)
+        if not acquired:
+            ser = self._serial
+            self._serial = None
+            if ser is not None:
+                try:
+                    ser.close()  # 强制关闭底层句柄，解除阻塞中的 read()
+                except Exception as e:
+                    logger.debug("强制关闭底层串口对象异常: %s", e)
+            return
+        try:
             if self._serial and self._serial.is_open:
                 try:
                     self._serial.close()
                 except Exception as e:
                     logger.debug("关闭底层串口对象异常: %s", e)
             self._serial = None
+        finally:
+            self._lock.release()
 
     @property
     def is_open(self) -> CallableBool:
@@ -104,28 +117,33 @@ class SerialTransport(ITransport):
 
     def write(self, data: bytes) -> int:
         with self._lock:
-            if not self._serial or not self._serial.is_open:
+            ser = self._serial
+            if ser is None or not ser.is_open:
                 raise TransportError("串口未连接或已关闭")
             try:
-                n = self._serial.write(data)
-                self._serial.flush()
+                n = ser.write(data)
+                ser.flush()
                 return n
             except Exception as e:
                 raise TransportError(f"串口写失败: {e}")
 
     def read(self, size: int = 1, timeout: Optional[float] = None) -> bytes:
         with self._lock:
-            if not self._serial or not self._serial.is_open:
+            ser = self._serial
+            if ser is None or not ser.is_open:
                 raise TransportError("串口未连接或已关闭")
             try:
                 if timeout is not None:
-                    old_to = self._serial.timeout
-                    self._serial.timeout = timeout
+                    old_to = ser.timeout
+                    ser.timeout = timeout
                     try:
-                        return self._serial.read(size)
+                        return ser.read(size)
                     finally:
-                        self._serial.timeout = old_to
-                return self._serial.read(size)
+                        try:
+                            ser.timeout = old_to
+                        except Exception:
+                            pass  # 句柄可能已被 close() 强制关闭
+                return ser.read(size)
             except Exception as e:
                 raise TransportError(f"串口读失败: {e}")
 

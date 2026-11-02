@@ -45,7 +45,7 @@ python -m pip install -r requirements.txt
 # 启动应用
 python main.py
 
-# 运行全量测试（当前基线：145 项通过，约 2.9 秒）
+# 运行全量测试（当前基线：151 项，约 3.0 秒）
 python tests/run_tests.py
 ```
 
@@ -127,7 +127,7 @@ PyMifareTool/
 │   └── dump_diff.py            # Dump 差分
 │
 ├── keys/                       # 标准/酒店/扩展/共享字典，约 7.4 万条
-├── tests/run_tests.py          # 19 个测试类，140 项测试
+├── tests/run_tests.py          # 21 个测试类，151 项测试
 ├── tools/                      # 开发期串口/协议调试脚本，不参与运行时
 │   └── m1t/nfc-bin/            # M1T 的 mfoc/mfcuk/hardnested 工具链
 ```
@@ -475,8 +475,8 @@ python tests/run_tests.py
 
 当前基线：
 
-- **140 项测试通过，0 项跳过（本机 COM3 可用）**
-- 约 **2.4 秒**
+- **151 项测试：本机 COM3 可用时 151 项通过；COM3 不在位时 Test06 跳过（150 通过 / 1 跳过）**
+- 约 **3.0 秒**
 - 覆盖协议、Dump、数据库、GUI 无头渲染、PN532、字典、二代证、BLE、CPU 卡、4K、魔术卡/克隆/攻击器、TCP/Modbus、PCSC 降级、破解模式、能力探测、M1T 工具链与外部工具 GBK/UTF-8 输出解码。
 
 但请注意测试盲区：
@@ -631,4 +631,4 @@ card_keys(uid, sector, key_a, key_b, updated_at,
 
 ---
 
-**最后更新依据**：基于当前工作区源码的全量静态分析；测试基线 140 项通过（本机 COM3 可用）。若代码已变化，请以实际源码为准并更新本文件。
+**最后更新依据**：基于当前工作区源码的全量静态分析；测试基线 151 项（COM3 在位时全通过）。若代码已变化，请以实际源码为准并更新本文件。

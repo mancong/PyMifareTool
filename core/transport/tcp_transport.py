@@ -47,19 +47,34 @@ class TcpTransport(ITransport):
                 return False
 
     def close(self) -> None:
-        with self._lock:
+        # 读线程可能持锁阻塞在 recv()，此处限时获取锁，避免关闭时长时间卡死
+        acquired = self._lock.acquire(timeout=0.5)
+        if not acquired:
             sock = self._sock
             self._sock = None
             self._rx_buffer.clear()
-            if sock is not None:
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                try:
-                    sock.close()
-                except Exception:
-                    pass
+            self._shutdown_socket(sock)
+            return
+        try:
+            sock = self._sock
+            self._sock = None
+            self._rx_buffer.clear()
+            self._shutdown_socket(sock)
+        finally:
+            self._lock.release()
+
+    @staticmethod
+    def _shutdown_socket(sock) -> None:
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        try:
+            sock.close()
+        except Exception:
+            pass
 
     @property
     def is_open(self) -> CallableBool:
@@ -123,23 +138,25 @@ class TcpTransport(ITransport):
 
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
         with self._lock:
+            sock = self._sock
+            if sock is None:
+                raise TransportError("TCP 链路未连接或已关闭")
             while len(self._rx_buffer) < size:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 try:
-                    self._sock.settimeout(remaining)
-                    chunk = self._sock.recv(4096)
+                    sock.settimeout(remaining)
+                    chunk = sock.recv(4096)
                 except socket.timeout:
                     break
                 except Exception as e:
                     raise TransportError(f"TCP 读失败: {e}")
                 finally:
-                    if self._sock is not None:
-                        try:
-                            self._sock.settimeout(self.timeout)
-                        except Exception:
-                            pass
+                    try:
+                        sock.settimeout(self.timeout)
+                    except Exception:
+                        pass  # 套接字可能已被 close() 强制关闭
                 if not chunk:
                     break
                 self._rx_buffer.extend(chunk)

@@ -485,16 +485,18 @@ class MagicCardDialog(QDialog):
             if "atqa" in card_info:
                 self.txt_atqa.setText(f"{(card_info['atqa'] >> 8) & 0xFF:02X} {card_info['atqa'] & 0xFF:02X}")
 
-    def _update_b0_preview(self):
+    def _current_block0_payload(self):
+        """
+        按当前输入控件解析 Block 0 载荷
+        返回 (uid_bytes, block0_bytes, error)；error 非空表示参数非法
+        """
         uid_str = self.txt_target_uid.text().strip().replace(" ", "")
         try:
             uid_bytes = bytes.fromhex(uid_str) if uid_str else b"\x00" * 4
-            if len(uid_bytes) != 4:
-                self.lbl_b0_preview.setText("UID 长度必须为 4 字节 (8 位十六进制)")
-                return
         except ValueError:
-            self.lbl_b0_preview.setText("UID 包含非法的十六进制字符")
-            return
+            return None, None, "UID 包含非法的十六进制字符"
+        if len(uid_bytes) != 4:
+            return None, None, "UID 长度必须为 4 字节 (8 位十六进制)"
 
         try:
             sak = int(self.txt_sak.text().strip().replace(" ", ""), 16)
@@ -517,17 +519,29 @@ class MagicCardDialog(QDialog):
             manuf = bytes.fromhex("62 63 64 65 66 67 68 69")
 
         b0 = CardConverter.build_block0(uid_bytes, sak=sak, atqa=atqa, manufacturer_data=manuf)
+        return uid_bytes, b0, ""
+
+    def _update_b0_preview(self):
+        _uid, b0, err = self._current_block0_payload()
+        if err:
+            self.lbl_b0_preview.setText(err)
+            return
         self.lbl_b0_preview.setText(" ".join(f"{b:02X}" for b in b0))
 
     def _on_write_block0(self):
-        b0_text = self.lbl_b0_preview.text().strip().replace(" ", "")
-        try:
-            b0_bytes = bytes.fromhex(b0_text)
-            if len(b0_bytes) != 16:
-                QMessageBox.warning(self, "参数错误", "Block 0 预览数据不合法，必须为 16 字节！")
-                return
-        except Exception:
-            QMessageBox.warning(self, "参数错误", "Block 0 数据格式无效！")
+        uid_bytes, b0_bytes, err = self._current_block0_payload()
+        if err or b0_bytes is None:
+            QMessageBox.warning(self, "参数错误", err or "Block 0 数据不合法！")
+            return
+
+        # 写入前反向校验 BCC，避免把不可识别的 Block 0 永久写进卡片
+        ok, detail = CardConverter.validate_block0(b0_bytes, uid_len=len(uid_bytes))
+        if not ok:
+            QMessageBox.warning(
+                self,
+                "Block 0 校验失败",
+                f"检测到非法的 Block 0 数据，已阻止写入：\n\n{detail}",
+            )
             return
 
         mode_idx = self.cmb_magic_mode.currentIndex()
@@ -540,6 +554,26 @@ class MagicCardDialog(QDialog):
                 key_a = b"\xFF" * 6
         except Exception:
             key_a = b"\xFF" * 6
+
+        bcc = b0_bytes[len(uid_bytes)]
+        sak = b0_bytes[len(uid_bytes) + 1]
+        atqa = b0_bytes[len(uid_bytes) + 2:len(uid_bytes) + 4]
+        res = QMessageBox.critical(
+            self,
+            "确认改写 Block 0",
+            "即将向卡片写入 Block 0（UID / 厂商数据块），该操作直接改写卡片身份信息：\n\n"
+            f"UID:  {' '.join(f'{b:02X}' for b in uid_bytes)}\n"
+            f"BCC:  {bcc:02X}\n"
+            f"SAK:  {sak:02X}    ATQA: {atqa.hex().upper()}\n"
+            f"魔术卡类型: {magic_type}\n"
+            f"校验结果: {detail}\n\n"
+            "错误写入可能导致卡片永久无法识别，是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if res != QMessageBox.StandardButton.Yes:
+            self.txt_log.append("⚠️ 已取消 Block 0 写入。")
+            return
 
         self._start_worker("write_block0", {
             "block0_bytes": b0_bytes,

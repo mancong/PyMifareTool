@@ -8,8 +8,10 @@ import sys
 import time
 import serial
 
-if sys.platform == "win32":
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+IDLE_GAP = 1.5  # 收到数据后静默多久视为本次刷卡结束（秒）
 
 def format_hex(data: bytes) -> str:
     return " ".join(f"{b:02X}" for b in data)
@@ -20,7 +22,7 @@ def listen_port(port="COM3", baud=9600, duration=15):
     print(f"[*] 持续监听时间: {duration} 秒")
     print(f"[*] >>> 请现在将 NFC 卡片贴向读卡器（观察红灯灭一秒再亮的过程）<<<")
     print(f"{'='*60}\n")
-    
+
     try:
         # 打开串口，超时 0.2 秒
         ser = serial.Serial(port, baudrate=baud, timeout=0.2)
@@ -32,15 +34,17 @@ def listen_port(port="COM3", baud=9600, duration=15):
         return None
 
     ser.reset_input_buffer()
-    
+
     start_time = time.time()
+    last_rx_time = 0.0
     received_bytes = bytearray()
-    
+
     while time.time() - start_time < duration:
         n = ser.in_waiting
         if n > 0:
             chunk = ser.read(n)
             received_bytes.extend(chunk)
+            last_rx_time = time.time()
             print(f"[★ 成功捕获到刷卡数据! ★]")
             print(f"  HEX:    {format_hex(chunk)}")
             print(f"  ASCII:  {chunk.decode('latin1', errors='replace')}")
@@ -50,17 +54,13 @@ def listen_port(port="COM3", baud=9600, duration=15):
             except Exception:
                 pass
             print(f"  总长度:  {len(received_bytes)} 字节\n")
-            # 继续监听 1 秒捕获完整后续数据
-            time.sleep(1.0)
-            if ser.in_waiting > 0:
-                more = ser.read(ser.in_waiting)
-                received_bytes.extend(more)
-                print(f"  后续追加: {format_hex(more)}")
+        elif received_bytes and (time.time() - last_rx_time) >= IDLE_GAP:
+            print(f"[*] 已连续 {IDLE_GAP} 秒无新数据，本次监听结束。")
             break
         time.sleep(0.05)
-        
+
     ser.close()
-    
+
     if not received_bytes:
         print(f"[-] 在波特率 {baud} 下暂未捕获到数据。")
         return None

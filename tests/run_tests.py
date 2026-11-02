@@ -3742,6 +3742,114 @@ class Test20McpServiceSuite(unittest.TestCase):
             finally:
                 ctx.close()
 
+class Test21AuditFixRound2(unittest.TestCase):
+    """审计修复第二批：Block 0 校验、tools 候选帧、魔术卡写入二次确认"""
+
+    def test_card_converter_validate_block0(self):
+        """Block 0 BCC 计算与反向校验（4/7 字节布局、BCC 错误、长度错误）"""
+        from core.models.card_converter import CardConverter
+
+        uid4 = bytes.fromhex("D77EA0DF")
+        self.assertEqual(CardConverter.block0_bcc(uid4), 0xD6)
+
+        b0 = CardConverter.build_block0(uid4, sak=0x08, atqa=0x0400)
+        self.assertEqual(len(b0), 16)
+        self.assertEqual(b0[4], 0xD6)
+
+        ok, detail = CardConverter.validate_block0(b0)
+        self.assertTrue(ok, detail)
+        self.assertIn("4 字节", detail)
+        self.assertIn("BCC=D6", detail)
+
+        # 7 字节 UID 布局：BCC = uid[3]^uid[4]^uid[5]^uid[6]
+        uid7 = bytes.fromhex("04112233445566")
+        b0_7 = CardConverter.build_block0(uid7, sak=0x08, atqa=0x0400)
+        self.assertEqual(len(b0_7), 16)
+        self.assertEqual(b0_7[7], CardConverter.block0_bcc(uid7))
+        ok7, detail7 = CardConverter.validate_block0(b0_7, uid_len=7)
+        self.assertTrue(ok7, detail7)
+        self.assertIn("7 字节", detail7)
+        # 未指定 uid_len 时应能自动识别 7 字节布局
+        ok_auto, _ = CardConverter.validate_block0(b0_7)
+        self.assertTrue(ok_auto)
+
+        # BCC 被篡改必须被拒绝
+        bad = bytearray(b0)
+        bad[4] ^= 0xFF
+        ok_bad, detail_bad = CardConverter.validate_block0(bytes(bad))
+        self.assertFalse(ok_bad)
+        self.assertIn("BCC", detail_bad)
+
+        # 长度非法必须被拒绝
+        self.assertFalse(CardConverter.validate_block0(b0[:15])[0])
+        with self.assertRaises(ValueError):
+            CardConverter.block0_bcc(b"\x01\x02\x03")
+
+    def test_tools_candidate_frames_buildable(self):
+        """tools/test_candidate_commands.build_candidates() 全部产出合法 bytes 帧"""
+        import importlib.util
+
+        tool_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "..", "tools", "test_candidate_commands.py")
+        spec = importlib.util.spec_from_file_location("candidate_commands", tool_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        candidates = module.build_candidates()
+        self.assertGreaterEqual(len(candidates), 6)
+        for name, frame in candidates:
+            self.assertIsInstance(frame, bytes, name)
+            self.assertGreaterEqual(len(frame), 3, name)
+            self.assertIn(frame[0], (0xAA, 0xBA), name)
+
+        # AABB 认证帧: AA BB | LEN CMD Sector KeyType Key(6) | BCC，共 13 字节
+        login = [frame for name, frame in candidates if "认证扇区0" in name][0]
+        self.assertEqual(len(login), 13)
+        self.assertEqual(login[2], 0x0A)
+        self.assertEqual(login[-1], module.calc_xor(login[2:-1]))
+
+    def test_magic_write_block0_requires_confirmation(self):
+        """魔术卡写 Block 0 必须经过 BCC 校验与二次确认，取消时不得启动 Worker"""
+        from unittest.mock import patch
+        from PyQt6.QtWidgets import QApplication, QMessageBox
+        from core.models.card_converter import CardConverter
+        from ui.magic_card_dialog import MagicCardDialog
+
+        app = QApplication.instance() or QApplication(sys.argv)
+        dlg = MagicCardDialog(serial_worker=None)
+        try:
+            dlg.txt_target_uid.setText("D7 7E A0 DF")
+            dlg.txt_sak.setText("08")
+            dlg.txt_atqa.setText("04 00")
+
+            # 1) 二次确认选择 No → 不启动 Worker
+            with patch("ui.magic_card_dialog.QMessageBox.critical",
+                       return_value=QMessageBox.StandardButton.No), \
+                    patch.object(dlg, "_start_worker") as start_worker:
+                dlg._on_write_block0()
+                start_worker.assert_not_called()
+            self.assertIsNone(dlg.active_thread)
+
+            # 2) 确认 Yes → 启动一次 write_block0，且载荷通过 BCC 校验
+            with patch("ui.magic_card_dialog.QMessageBox.critical",
+                       return_value=QMessageBox.StandardButton.Yes), \
+                    patch.object(dlg, "_start_worker") as start_worker_yes:
+                dlg._on_write_block0()
+                start_worker_yes.assert_called_once()
+                action, params = start_worker_yes.call_args.args
+                self.assertEqual(action, "write_block0")
+                self.assertTrue(CardConverter.validate_block0(params["block0_bytes"])[0])
+
+            # 3) UID 非法 → 直接警告阻止，连二次确认都不进入
+            dlg.txt_target_uid.setText("D7 7E A0")
+            with patch("ui.magic_card_dialog.QMessageBox.warning") as warning, \
+                    patch.object(dlg, "_start_worker") as start_worker_bad:
+                dlg._on_write_block0()
+                warning.assert_called_once()
+                start_worker_bad.assert_not_called()
+        finally:
+            dlg.close()
+
 
 def run_all_tests():
     print("\n" + "="*70)
@@ -3771,6 +3879,7 @@ def run_all_tests():
     suite.addTests(loader.loadTestsFromTestCase(Test18CrackOptimizationAndCapabilities))
     suite.addTests(loader.loadTestsFromTestCase(Test19CodeReviewReportImprovements))
     suite.addTests(loader.loadTestsFromTestCase(Test20McpServiceSuite))
+    suite.addTests(loader.loadTestsFromTestCase(Test21AuditFixRound2))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
