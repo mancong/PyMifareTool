@@ -4,6 +4,18 @@
 # 忽略 keys 目录下所有 extended-std_share_ 开头的文件
 keys/extended-std_share_*
 
+# Matplotlib 临时目录
+matplotlib-*/
+
+# SQLite 数据库与 WAL 临时文件
+cards.db
+cards.db-wal
+cards.db-shm
+
+# 特殊的目录也需要忽略
+/tools/m1t/nfc-bin/
+/docs/changes/
+
 # Python 构建缓存
 __pycache__/
 *.pyc
@@ -44,14 +56,3 @@ __pycache__/
 /nbdist/
 /.nb-gradle/
 /build/
-
-# Matplotlib 临时目录
-matplotlib-*/
-
-# SQLite 数据库与 WAL 临时文件
-cards.db
-cards.db-wal
-cards.db-shm
-
-/tools/m1t/nfc-bin/
-/docs/changes/
