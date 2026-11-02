@@ -6,8 +6,11 @@ PyMifareTool - PN532 二代居民身份证 (ISO/IEC 14443-B) 扩展适配 Mixin
 """
 
 import time
+import logging
 import serial
 from typing import Optional, Dict, Any, List, Tuple
+
+logger = logging.getLogger("pymifare.pn532_id_card")
 from core.protocols.iso14443b import (
     ISO14443BProtocol,
     CIU_REGISTERS_TYPE_B_ID,
@@ -103,4 +106,7 @@ class PN532IdCardMixin:
             }
         finally:
             # 无论读卡成功或未感应到身份证，均无条件将 CIU 寄存器恢复为 Type A 标准配置
-            self.restore_type_a_registers(ser)
+            try:
+                self.restore_type_a_registers(ser)
+            except Exception as exc:
+                logger.debug("恢复 Type A 射频寄存器异常 (串口可能已断开): %s", exc)

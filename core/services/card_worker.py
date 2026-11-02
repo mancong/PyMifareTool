@@ -179,6 +179,11 @@ class CardOperationWorker(QThread):
         finally:
             if hasattr(self.worker, "set_exclusive"):
                 self.worker.set_exclusive(False)
+            try:
+                from core.card_db import CardDatabase
+                CardDatabase().release_thread_connection()
+            except Exception:
+                pass
 
     def _do_crack_keys(self):
         self.sig_log.emit("开始执行 Mifare Classic 密钥字典攻击 (射频半双工，单线程顺序扫描)...")

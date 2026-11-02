@@ -14,13 +14,39 @@ class AccessBitsEncoder:
     """
 
     @classmethod
+    def validate_access_bytes(cls, access_bytes: bytes) -> bool:
+        """
+        校验 3 字节或 4 字节控制位的正码与反码是否严格按位互补 (遵循 NXP AN1305 标准)
+        支持纯控制位 3 字节 (b6, b7, b8) 或带 GPB 备用字节的 4 字节 (b6, b7, b8, b9)
+        """
+        if not access_bytes or len(access_bytes) < 3:
+            return False
+        b6, b7, b8 = access_bytes[0], access_bytes[1], access_bytes[2]
+        c1 = (b7 >> 4) & 0x0F
+        c1_inv = b6 & 0x0F
+        c2 = b8 & 0x0F
+        c2_inv = (b6 >> 4) & 0x0F
+        c3 = (b8 >> 4) & 0x0F
+        c3_inv = b7 & 0x0F
+        return ((c1 ^ c1_inv) == 0x0F) and ((c2 ^ c2_inv) == 0x0F) and ((c3 ^ c3_inv) == 0x0F)
+
+    @classmethod
     def encode(cls, configs: List[Tuple[int, int, int]], user_byte: int = 0x69) -> bytes:
         """
-        configs: 长度为 4 的列表，每项为 (C1, C2, C3) 元组 (0 或 1)
-        user_byte: Byte 9 厂商备用/通用字节，默认 0x69
+        configs: 长度为 4 的列表，每项为 (C1, C2, C3) 元组 (元素必须严格为 0 或 1)
+        user_byte: Byte 9 厂商备用/通用字节，必须在 0x00~0xFF 范围内，默认 0x69
         """
         if len(configs) != 4:
             raise ValueError("必须提供 4 个块的 (C1, C2, C3) 配置")
+
+        for idx, cfg in enumerate(configs):
+            if not isinstance(cfg, (tuple, list)) or len(cfg) != 3:
+                raise ValueError(f"Block {idx} 配置必须是长度为 3 的 (C1, C2, C3) 元组")
+            if any(bit not in (0, 1) for bit in cfg):
+                raise ValueError(f"Block {idx} 的控制位必须严格为 0 或 1，当前值: {cfg}")
+
+        if not isinstance(user_byte, int) or not (0 <= user_byte <= 0xFF):
+            raise ValueError(f"user_byte 必须在 0x00~0xFF 范围内: {user_byte}")
 
         b6 = 0
         b7 = 0
@@ -28,9 +54,6 @@ class AccessBitsEncoder:
 
         for i in range(4):
             c1, c2, c3 = configs[i]
-            c1 = 1 if c1 else 0
-            c2 = 1 if c2 else 0
-            c3 = 1 if c3 else 0
 
             c1_inv = 1 - c1
             c2_inv = 1 - c2
@@ -48,7 +71,10 @@ class AccessBitsEncoder:
             b8 |= (c2 << i)
             b8 |= (c3 << (4 + i))
 
-        return bytes([b6, b7, b8, user_byte & 0xFF])
+        result = bytes([b6, b7, b8, user_byte & 0xFF])
+        if not cls.validate_access_bytes(result):
+            raise ValueError("生成的控制位正反码校验失败，已阻止输出以防锁卡")
+        return result
 
 
 class AccessBitsDecoder:

@@ -48,7 +48,8 @@ __pycache__/
 # Matplotlib 临时目录
 matplotlib-*/
 
-# SQLite WAL 临时文件
+# SQLite 数据库与 WAL 临时文件
+cards.db
 cards.db-wal
 cards.db-shm
 

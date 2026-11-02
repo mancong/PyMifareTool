@@ -20,22 +20,16 @@ class CallableInt(int):
         return int(self)
 
 
-class CallableBool:
-    """支持作为布尔值使用，也支持作为无参函数调用的特殊布尔对象，以双向兼容 is_open 属性与方法"""
-    def __init__(self, val: bool):
-        self._val = bool(val)
-
-    def __bool__(self) -> bool:
-        return self._val
+class CallableBool(int):
+    """支持作为布尔/整数值使用，也支持作为无参函数调用的特殊布尔对象，以双向兼容 is_open 属性与方法"""
+    def __new__(cls, val: bool):
+        return super().__new__(cls, 1 if val else 0)
 
     def __call__(self) -> bool:
-        return self._val
-
-    def __eq__(self, other) -> bool:
-        return self._val == bool(other)
+        return bool(self)
 
     def __repr__(self) -> str:
-        return str(self._val)
+        return "True" if self else "False"
 
 
 @runtime_checkable

@@ -115,6 +115,8 @@ class ReaderAdapterFactory:
 
         # 3. 尝试初始化 PN532；init_device 会在固件与 SAM 均无应答时返回 False
         pn532 = PN532Adapter()
+        if peeked:
+            pn532.initial_rx_data = peeked
         if pn532.init_device(ser):
             fw = pn532.get_firmware_version(ser)
             if "PN532" in fw:

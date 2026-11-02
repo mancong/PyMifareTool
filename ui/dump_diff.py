@@ -117,6 +117,7 @@ class DumpDiffWidget(QWidget):
         diff_sectors = set()
         diff_blocks = set()
 
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(0)
         row = 0
 
@@ -162,6 +163,8 @@ class DumpDiffWidget(QWidget):
                             self.table.setItem(row, col, item)
 
                         row += 1
+
+        self.table.setUpdatesEnabled(True)
 
         if diff_count == 0:
             self.lbl_stats.setText("✅ 对比结果: 两张卡数据 100% 完全一致！")

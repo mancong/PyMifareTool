@@ -76,12 +76,15 @@ class SerialTransport(ITransport):
 
     @dtr.setter
     def dtr(self, value: bool) -> None:
-        self._dtr = bool(value)
+        target = bool(value)
         if self._serial is not None and self._serial.is_open:
             try:
-                self._serial.dtr = self._dtr
+                self._serial.dtr = target
+                self._dtr = target
             except Exception as e:
                 logger.debug("DTR 设置失败 (硬件可能不支持): %s", e)
+        else:
+            self._dtr = target
 
     @property
     def rts(self) -> bool:
@@ -89,12 +92,15 @@ class SerialTransport(ITransport):
 
     @rts.setter
     def rts(self, value: bool) -> None:
-        self._rts = bool(value)
+        target = bool(value)
         if self._serial is not None and self._serial.is_open:
             try:
-                self._serial.rts = self._rts
+                self._serial.rts = target
+                self._rts = target
             except Exception as e:
                 logger.debug("RTS 设置失败 (硬件可能不支持): %s", e)
+        else:
+            self._rts = target
 
     def write(self, data: bytes) -> int:
         with self._lock:

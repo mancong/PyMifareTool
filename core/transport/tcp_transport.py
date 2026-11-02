@@ -15,6 +15,8 @@ from .base import CallableBool, CallableInt, ITransport, TransportError
 class TcpTransport(ITransport):
     """线程安全的 TCP 字节流传输层"""
 
+    MAX_BUFFER_SIZE = 65536  # 64KB 接收缓冲区保护上限
+
     def __init__(self, host: str = "127.0.0.1", port: int = 5000,
                  timeout: float = 0.5, connect_timeout: Optional[float] = None):
         self.host = host
@@ -91,6 +93,8 @@ class TcpTransport(ITransport):
                 self._sock.settimeout(self.timeout)
             if chunk:
                 self._rx_buffer.extend(chunk)
+                if len(self._rx_buffer) > self.MAX_BUFFER_SIZE:
+                    del self._rx_buffer[:-self.MAX_BUFFER_SIZE]
         except (BlockingIOError, socket.timeout):
             pass
         except Exception:

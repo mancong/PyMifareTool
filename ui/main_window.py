@@ -745,6 +745,7 @@ class MainWindow(QMainWindow):
         log_lay.addLayout(log_head)
 
         self.txt_log = QPlainTextEdit()
+        self.txt_log.document().setMaximumBlockCount(2000)
         self.txt_log.setMinimumHeight(60)
         self.txt_log.setMaximumHeight(130)
         log_lay.addWidget(self.txt_log)

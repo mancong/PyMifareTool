@@ -41,6 +41,20 @@ class CardDatabase:
                 self._connections.add(conn)
             return conn
 
+    def release_thread_connection(self) -> None:
+        """
+        释放当前线程绑定的 SQLite 连接，防止短生命周期 Worker 线程累积句柄
+        """
+        with self._connections_lock:
+            conn = getattr(self._local, "conn", None)
+            if conn is not None:
+                self._connections.discard(conn)
+                self._local.conn = None
+                try:
+                    conn.close()
+                except Exception as exc:
+                    logger.debug("关闭线程 SQLite 连接异常: %s", exc)
+
     @contextmanager
     def _cursor(self, write: bool = False):
         conn = self._get_conn()
@@ -53,8 +67,8 @@ class CardDatabase:
             if write:
                 try:
                     conn.rollback()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("数据库事务回滚异常: %s", exc)
             raise
         finally:
             cursor.close()

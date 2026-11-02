@@ -4,6 +4,7 @@ PyMifareTool - 卡号格式多行业标准换算模型 (CardConverter)
 针对 4 / 7 / 8 / 10 字节物理 UID 进行正序、倒序、8H10D、门禁韦根 WG26/34 换算
 """
 
+import os
 from typing import Dict, Any, Optional
 
 
@@ -13,7 +14,8 @@ class CardConverter:
     @staticmethod
     def generate_random_uid(length: int = 4) -> bytes:
         """生成随机物理卡号 UID (避免以 0x00 或 0x88 级联符开头)"""
-        import os
+        if length <= 0:
+            length = 4
         b = bytearray(os.urandom(length))
         while b[0] in (0x00, 0x88):
             b[0] = os.urandom(1)[0]

@@ -96,11 +96,19 @@ class ISO14443BProtocol:
         return cmd_raw + cls.calculate_crc_b(cmd_raw)
 
     @classmethod
-    def parse_guid_response(cls, resp_data: bytes) -> Optional[bytes]:
+    def parse_guid_response(cls, resp_data: bytes, verify_crc: bool = True) -> Optional[bytes]:
         """
         解析读取 GUID 返回的响应
-        返回: 8 字节物理卡号 GUID，失败返回 None
+        resp_data: 通常为 8 字节 GUID (+ 2 字节状态码 90 00 + 2 字节 CRC-B)
+        返回: 8 字节物理卡号 GUID，校验失败或长度不足返回 None
         """
-        if len(resp_data) >= 8:
-            return resp_data[:8]
-        return None
+        if not resp_data or len(resp_data) < 8:
+            return None
+
+        # 若数据包含完整报文 (>= 12 字节: 8 字节 GUID + 2 字节 SW + 2 字节 CRC-B)，执行 CRC-B 校验
+        if verify_crc and len(resp_data) >= 12:
+            expected_crc = cls.calculate_crc_b(resp_data[:-2])
+            if resp_data[-2:] != expected_crc:
+                return None
+
+        return resp_data[:8]

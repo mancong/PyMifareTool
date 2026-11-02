@@ -1038,6 +1038,7 @@ class Test09IdCardReaderAndTypeBProtocol(unittest.TestCase):
 
     def test_mock_id_card_full_reading_pipeline(self):
         """桩测试：模拟 PCR532 经由 REQB -> ATTRIB -> Read GUID 完整读取二代身份证 8 字节 UID"""
+        from core.protocols.iso14443b import ISO14443BProtocol
         adapter = PN532Adapter()
 
         class MockSerialForId:
@@ -1082,9 +1083,10 @@ class Test09IdCardReaderAndTypeBProtocol(unittest.TestCase):
                     resp = PN532Adapter.build_response_frame(0x43, bytes([0x00, 0x00]))
                     self.read_queue.extend(ack + resp)
                 elif bytes([0xD4, 0x42, 0x00, 0x36, 0x00, 0x00, 0x08]) in data:
-                    # Read GUID -> 返回 0x00 状态码 + 8 字节身份证 UID + 4 字节 CRC
+                    # Read GUID -> 返回 0x00 状态码 + 8 字节身份证 UID + 2 字节 90 00 + 2 字节有效 CRC-B
                     mock_id_uid = bytes([0x41, 0x52, 0x63, 0x74, 0x85, 0x96, 0xA7, 0xB8])
-                    guid_resp = bytes([0x00]) + mock_id_uid + bytes([0x90, 0x00, 0x12, 0x34])
+                    guid_payload = mock_id_uid + bytes([0x90, 0x00])
+                    guid_resp = bytes([0x00]) + guid_payload + ISO14443BProtocol.calculate_crc_b(guid_payload)
                     resp = PN532Adapter.build_response_frame(0x43, guid_resp)
                     self.read_queue.extend(ack + resp)
 
@@ -3514,6 +3516,64 @@ class Test19CodeReviewReportImprovements(unittest.TestCase):
         self.assertTrue(callable(getattr(adapter, "send_apdu")))
         self.assertTrue(callable(getattr(adapter, "read_cpu_card_public_info")))
         self.assertTrue(callable(getattr(adapter, "scan_cpu_card_tree")))
+
+    def test_access_bits_strict_validation(self):
+        """测试 AccessBitsEncoder 严格参数校验与 validate_access_bytes"""
+        from core.models.access_bits import AccessBitsEncoder, AccessBitsDecoder
+
+        # 默认出厂控制字校验合法
+        default_bytes = bytes([0xFF, 0x07, 0x80, 0x69])
+        self.assertTrue(AccessBitsEncoder.validate_access_bytes(default_bytes))
+        self.assertTrue(AccessBitsEncoder.validate_access_bytes(default_bytes[:3]))
+
+        # 损坏的反码控制字校验失败
+        corrupt_bytes = bytes([0x00, 0x00, 0x00, 0x69])
+        self.assertFalse(AccessBitsEncoder.validate_access_bytes(corrupt_bytes))
+
+        # 元组长度非 4
+        with self.assertRaises(ValueError):
+            AccessBitsEncoder.encode([(0, 0, 0)] * 3)
+
+        # 块位值非 0 或 1
+        with self.assertRaises(ValueError):
+            AccessBitsEncoder.encode([(0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 2, 0)])
+
+        # user_byte 超出 0x00~0xFF
+        with self.assertRaises(ValueError):
+            AccessBitsEncoder.encode([(0, 0, 0)] * 4, user_byte=300)
+
+    def test_iso14443b_crc_validation(self):
+        """测试二代证 GUID 响应的 CRC-B 严谨性校验"""
+        from core.protocols.iso14443b import ISO14443BProtocol
+
+        guid = bytes([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88])
+        sw = bytes([0x90, 0x00])
+        payload = guid + sw
+        valid_crc = ISO14443BProtocol.calculate_crc_b(payload)
+
+        # 完整合规帧
+        self.assertEqual(ISO14443BProtocol.parse_guid_response(payload + valid_crc), guid)
+
+        # CRC-B 损坏帧 (电磁干扰)
+        corrupted = payload + bytes([valid_crc[0] ^ 0xFF, valid_crc[1]])
+        self.assertIsNone(ISO14443BProtocol.parse_guid_response(corrupted))
+
+    def test_callable_bool_subclass_int(self):
+        """测试 CallableBool 继承 int 后的数值兼容性与调用能力"""
+        from core.transport.base import CallableBool
+
+        cb_true = CallableBool(True)
+        cb_false = CallableBool(False)
+
+        self.assertTrue(isinstance(cb_true, int))
+        self.assertEqual(cb_true, 1)
+        self.assertEqual(cb_true, True)
+        self.assertTrue(cb_true())
+
+        self.assertTrue(isinstance(cb_false, int))
+        self.assertEqual(cb_false, 0)
+        self.assertEqual(cb_false, False)
+        self.assertFalse(cb_false())
 
 
 

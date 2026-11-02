@@ -7,6 +7,7 @@ PyMifareTool - PN532 ISO/IEC 14443-4 CPU 智能卡与 APDU/PBOC/交通联合 扩
 
 import serial
 from typing import Optional, Dict, Any, List
+from core.transport.base import TransportLike
 
 
 class PN532CpuCardMixin:
@@ -48,7 +49,7 @@ class PN532CpuCardMixin:
             data[-1] = le
         return bytes(data)
 
-    def send_apdu(self, ser: serial.Serial, apdu: bytes, timeout: float = 0.5, auto_get_response: bool = True) -> Dict[str, Any]:
+    def send_apdu(self, ser: TransportLike, apdu: bytes, timeout: float = 0.5, auto_get_response: bool = True) -> Dict[str, Any]:
         """
         向当前激活的 ISO/IEC 14443-4 CPU 卡发送原生 APDU 并接收应答 (遵循 ISO 7816-4 与 NXP UM0701-04 InDataExchange)
         支持状态字自动协商:
@@ -117,8 +118,26 @@ class PN532CpuCardMixin:
                 card_res2 = res2[1:]
                 sw1_2 = card_res2[-2]
                 sw2_2 = card_res2[-1]
-                sw_hex2 = f"{sw1_2:02X}{sw2_2:02X}"
                 full_data = card_res2[:-2]
+
+                # 若修正 Le 重发后卡片提示 61xx，继续自动取回数据
+                if sw1_2 == 0x61:
+                    cur_sw1, cur_sw2 = sw1_2, sw2_2
+                    for _ in range(8):
+                        if cur_sw1 != 0x61:
+                            break
+                        get_resp_apdu = bytes([0x00, 0xC0, 0x00, 0x00, cur_sw2])
+                        res3 = self._send_and_receive(
+                            ser, self.CMD_IN_DATA_EXCHANGE, bytes([0x01]) + get_resp_apdu, timeout=timeout
+                        )
+                        if not (res3 and len(res3) >= 3 and res3[0] == 0x00):
+                            break
+                        card_res3 = res3[1:]
+                        cur_sw1, cur_sw2 = card_res3[-2], card_res3[-1]
+                        full_data += card_res3[:-2]
+                    sw1_2, sw2_2 = cur_sw1, cur_sw2
+
+                sw_hex2 = f"{sw1_2:02X}{sw2_2:02X}"
                 return {
                     "ok": (sw_hex2 == "9000"),
                     "sw1": sw1_2, "sw2": sw2_2,
@@ -139,7 +158,7 @@ class PN532CpuCardMixin:
             "data_hex": rx_data.hex().upper(),
         }
 
-    def read_cpu_card_public_info(self, ser: serial.Serial, timeout: float = 0.6) -> Dict[str, Any]:
+    def read_cpu_card_public_info(self, ser: TransportLike, timeout: float = 0.6) -> Dict[str, Any]:
         """
         一键全量读取 CPU 智能卡 (全国交通联合/城市交通卡/银联PBOC借贷记卡) 公开信息与最近流水
         实现自适应 AID 选择、0015 公开信息解析、SFI 2 银行卡记录读取、电子钱包余额与双格式循环记录解析
@@ -283,7 +302,7 @@ class PN532CpuCardMixin:
             "logs": logs,
         }
 
-    def scan_cpu_card_tree(self, ser: serial.Serial, timeout: float = 0.35, progress_cb=None, abort_check=None) -> Dict[str, Any]:
+    def scan_cpu_card_tree(self, ser: TransportLike, timeout: float = 0.35, progress_cb=None, abort_check=None) -> Dict[str, Any]:
         """
         深度全景遍历 CPU 智能卡 COS 全文件系统与常见 SFI/FID 目录树
         支持 progress_cb 回调与 abort_check 安全快速中断

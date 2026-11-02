@@ -409,6 +409,8 @@ class SectorTableWidget(QWidget):
     def refresh_table(self):
         """刷新整张表格渲染，并联动刷新 KPI 统计、扇区雷达与 Inspector"""
         self._updating_table = True
+        self.table.setUpdatesEnabled(False)
+        self.table.blockSignals(True)
         self.table.clearSpans()
 
         total_blocks = self.dump.block_count
@@ -538,6 +540,10 @@ class SectorTableWidget(QWidget):
         if selected_block >= self.dump.block_count:
             selected_block = 0
         self.inspector.inspect_block(selected_block, self.dump)
+
+        self.table.blockSignals(False)
+        self.table.setUpdatesEnabled(True)
+        self._updating_table = False
 
     def _on_cell_changed(self, row: int, col: int):
         if self._updating_table:

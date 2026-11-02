@@ -70,7 +70,8 @@ class SerialWorker(QThread):
         """设置后台自动寻卡轮询周期 (毫秒，最小 50ms)"""
         try:
             ms = int(interval_ms)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            logger.warning("设置后台寻卡轮询周期无效: %s (%s)", interval_ms, exc)
             return
         self._poll_interval = max(0.05, ms / 1000.0)
 
