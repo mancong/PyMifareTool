@@ -2550,6 +2550,23 @@ class Test17AnalysisReportFixes(unittest.TestCase):
         def flush(self):
             pass
 
+    def test_send_raw_is_blocked_for_one_way_broadcaster(self):
+        from core.services.serial_worker import SerialWorker
+        from core.adapters.broadcaster_adapter import BroadcasterAdapter
+
+        worker = SerialWorker(device_type="broadcaster")
+        fake_serial = self.FakeSerial()
+        worker._running = True
+        worker._serial = fake_serial
+        worker.adapter = BroadcasterAdapter()
+
+        self.assertFalse(worker.send_raw(bytes((0, 1))))
+        self.assertEqual(fake_serial.writes, [])
+
+        worker.adapter = type("BidirectionalAdapter", (), {})()
+        self.assertTrue(worker.send_raw(bytes((0, 1))))
+        self.assertEqual(fake_serial.writes, [bytes((0, 1))])
+
         def reset_input_buffer(self):
             pass
 
@@ -2925,6 +2942,79 @@ class Test17AnalysisReportFixes(unittest.TestCase):
         self.assertTrue(results)
         self.assertFalse(results[0][0])
         self.assertIn("中止", results[0][1])
+
+    def test_read_card_partial_failure_reports_incomplete_result(self):
+        from core.services.card_worker import CardOperationWorker
+
+        class FakeWorker:
+            def authenticate(self, block, key_type, key, timeout=0.25):
+                return True
+
+            def read_block(self, block, timeout=0.25):
+                return b"\x00" * 16 if block == 0 else None
+
+        op = CardOperationWorker(
+            FakeWorker(), CardOperationWorker.OP_READ_CARD,
+            target_sectors=[0], custom_keys=["FFFFFFFFFFFF"],
+        )
+        results = []
+        op.sig_finished.connect(lambda ok, msg, data: results.append((ok, msg, data)))
+        op._do_read_card()
+
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0][0])
+        self.assertIn("失败/加密", results[0][1])
+        self.assertIsNotNone(results[0][2])
+        from core.models.dump import BlockState
+        self.assertEqual(results[0][2].get_block_state(0), BlockState.READ_OK)
+        self.assertEqual(results[0][2].get_block_state(1), BlockState.READ_FAILED)
+
+    def test_manual_sector_partial_read_reports_incomplete(self):
+        from core.services.card_worker import CardOperationWorker
+
+        class FakeWorker:
+            def authenticate(self, block, key_type, key, timeout=0.25):
+                return True
+
+            def read_block(self, block, timeout=0.25):
+                return b"\x00" * 16 if block == 0 else None
+
+        op = CardOperationWorker(
+            FakeWorker(), CardOperationWorker.OP_READ_SECTOR,
+            target_sectors=[0], manual_key={"key_type": "A", "key": b"\xFF" * 6},
+        )
+        results = []
+        op.sig_finished.connect(lambda ok, msg, data: results.append((ok, msg, data)))
+        op._do_read_sector()
+
+        self.assertFalse(results[0][0])
+        self.assertIn("部分完成", results[0][1])
+        self.assertIn("1/4", results[0][1])
+
+    def test_write_card_reports_block_failures_but_ignores_protected_skip(self):
+        from core.services.card_worker import CardOperationWorker
+        from core.models.dump import MifareDump
+
+        class FakeWorker:
+            def authenticate(self, block, key_type, key, timeout=0.25):
+                return True
+
+            def write_block(self, block, data, timeout=0.25):
+                return False
+
+        dump = MifareDump()
+        op = CardOperationWorker(
+            FakeWorker(), CardOperationWorker.OP_WRITE_CARD,
+            dump_to_write=dump, allow_block0_write=False,
+        )
+        op._write_single_block = lambda block, data: False
+        results = []
+        op.sig_finished.connect(lambda ok, msg, data: results.append((ok, msg, data)))
+        op._do_write_card()
+
+        self.assertFalse(results[0][0])
+        self.assertIn("失败", results[0][1])
+        self.assertIn("跳过 1 块", results[0][1])
 
     def test_read_sector_abort_emits_finished_signal(self):
         from core.services.card_worker import CardOperationWorker

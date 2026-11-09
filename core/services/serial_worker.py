@@ -125,6 +125,10 @@ class SerialWorker(QThread):
         """线程安全地发送原始字节序列"""
         if not self.is_connected():
             return False
+        if isinstance(self.adapter, BroadcasterAdapter):
+            # 广播器物理上仅支持 AA BB 上行广播，拒绝调试终端等旁路下行。
+            self.sig_raw_log.emit("SYS", "单向广播器不支持发送数据，已拒绝原始发送")
+            return False
         try:
             with self._tx_lock:
                 self._serial.write(data)

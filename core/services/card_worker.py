@@ -507,9 +507,14 @@ class CardOperationWorker(QThread):
                 pct = int(((block + 1) / total_blocks) * 100)
                 self.sig_progress.emit(pct, f"正在读取 Block {block:02d} ...")
 
-        self.sig_progress.emit(100, "全卡读取完成！")
+        if read_failed_count:
+            self.sig_progress.emit(100, f"读取结束：{read_failed_count} 块读取失败或受密钥保护。")
+        else:
+            self.sig_progress.emit(100, "全卡读取完成！")
         summary = f"读卡完毕: 成功读取 {read_success_count}/{total_blocks} 块，失败/加密 {read_failed_count} 块。"
-        self.sig_finished.emit(True, summary, dump)
+        # success 表示目标范围内所有块都成功读取；部分 dump 仍随信号返回，
+        # 调用方可据此展示/保存可读取的数据，同时准确提示未完成状态。
+        self.sig_finished.emit(read_failed_count == 0, summary, dump)
 
     def _do_read_sector(self):
         """使用用户手动输入的单一密钥认证并读取目标扇区 (测试解密)"""
@@ -559,8 +564,10 @@ class CardOperationWorker(QThread):
         key_b = key_hex if key_type == "B" else "未破解"
         self.sig_sector_cracked.emit(sector, key_a, key_b)
         self.sig_progress.emit(100, "手动解密读取完成")
-        summary = f"手动解密成功: 扇区 S{sector:02d} (Key{key_type}={key_hex}) 已读取 {read_ok}/{block_count} 块。"
-        self.sig_finished.emit(True, summary, None)
+        complete = read_ok == block_count
+        status = "完成" if complete else "部分完成"
+        summary = f"手动解密{status}: 扇区 S{sector:02d} (Key{key_type}={key_hex}) 已读取 {read_ok}/{block_count} 块。"
+        self.sig_finished.emit(complete, summary, None)
 
     def _do_write_card(self):
         if not self.dump_to_write:
@@ -640,7 +647,9 @@ class CardOperationWorker(QThread):
 
         self.sig_progress.emit(100, "写卡流程执行完毕！")
         summary = f"写卡完成: 成功写入 {write_success} 块，失败 {write_fail} 块，跳过 {write_skipped} 块。"
-        self.sig_finished.emit(True, summary, None)
+        # Block 0 等用户明确允许写入前的安全跳过属于预期行为；只有实际写入
+        # 失败才表示整体写卡未完成，避免把已跳过保护块误报为失败。
+        self.sig_finished.emit(write_fail == 0, summary, None)
 
     def _do_probe_firmware(self):
         adapter = getattr(self.worker, "adapter", None)
